@@ -690,7 +690,7 @@ def watcher():
 # ------------------------------------------------------------------- кнопки
 def on_button(q):
     chat = q["message"]["chat"]["id"]
-    if q["from"]["id"] not in ALLOWED:
+    if not access.есть_доступ(q["from"]["id"]):
         return
     act, _, arg = q["data"].partition(":")
     tg("answerCallbackQuery", callback_query_id=q["id"])
@@ -1054,8 +1054,12 @@ def on_message(m):
 def main():
     if not TOKEN:
         raise SystemExit("Нет TELEGRAM_BOT_TOKEN в ~/.cappi/api.env")
-    if not ALLOWED:
-        print("⚠ TELEGRAM_ALLOWED_IDS пуст — бот никого не пустит")
+    люди = access.все()
+    if not люди:
+        print("⚠ Никому не выдан доступ. Заполни TELEGRAM_ALLOWED_IDS "
+              "в ~/.cappi/api.env — эти id станут админами при первом запуске.")
+    else:
+        print("доступ: " + ", ".join(f"{u}·{v['роль']}" for u, v in люди.items()))
     порт = webhook.serve()
     if порт:
         webhook.СЛУШАТЕЛИ.append(_зона_изменилась)
