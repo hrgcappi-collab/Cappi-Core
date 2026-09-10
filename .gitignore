@@ -11,6 +11,7 @@ pending.json
 zone_events.jsonl
 unknown.log
 plan.json
+access.json
 changes.log
 
 __pycache__/

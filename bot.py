@@ -8,6 +8,7 @@ import json, os, re, sys, threading, time, traceback, urllib.parse, urllib.reque
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
+import access
 import cappi
 import report
 import webhook
@@ -17,7 +18,7 @@ START = time.time()
 
 CFG = cappi.cfg()
 TOKEN = CFG.get("TELEGRAM_BOT_TOKEN", "")
-ALLOWED = {int(x) for x in re.findall(r"\d+", CFG.get("TELEGRAM_ALLOWED_IDS", ""))}
+access.bootstrap()          # перенос старого списка в роли, если ещё не было
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 STATE_DIR = os.path.expanduser("~/.cappi")
@@ -61,10 +62,20 @@ _lock = threading.Lock()
 _menu = {}          # чат → в каком модуле он сейчас
 
 
+# Какой пункт главного меню какого права требует. Показывать кнопку,
+# которая ответит «нельзя», — хуже, чем не показывать её вовсе.
+ТРЕБУЕТ = {"💰 Цены": "витрины", "📈 Показатели": "показатели",
+           "⚙️ Админка": "админка"}
+
+
 def keyboard(chat):
-    return {"keyboard": [[{"text": b} for b in row]
-                         for row in МЕНЮ[_menu.get(chat, "главное")]],
-            "resize_keyboard": True}
+    ряды = []
+    for row in МЕНЮ[_menu.get(chat, "главное")]:
+        видимые = [b for b in row
+                   if b not in ТРЕБУЕТ or access.можно(chat, ТРЕБУЕТ[b])]
+        if видимые:
+            ряды.append([{"text": b} for b in видимые])
+    return {"keyboard": ряды, "resize_keyboard": True}
 
 
 # ------------------------------------------------------------------ Telegram
@@ -398,12 +409,63 @@ def cmd_audit(chat, n=15):
 
 
 def cmd_access(chat):
-    строки = ["<b>Доступ к боту</b>", ""]
-    for uid in sorted(ALLOWED):
-        строки.append(f"  <code>{uid}</code>" + ("  ← ты" if uid == chat else ""))
-    строки += ["", "<i>Список правится в TELEGRAM_ALLOWED_IDS "
-                   "(~/.cappi/api.env), затем перезапуск бота.</i>"]
-    say(chat, "\n".join(строки))
+    """Список людей с ролями и кнопками управления."""
+    if not access.можно(chat, "доступ"):
+        return say(chat, "Управлять доступом может только админ.")
+    люди = access.все()
+    строки = [f"<b>Доступ к боту</b> — {len(люди)} чел.", ""]
+    кнопки = []
+    for uid, v in sorted(люди.items(), key=lambda x: x[1]["роль"]):
+        сам = "  ← ты" if int(uid) == chat else ""
+        имя = f" {v['имя']}" if v.get("имя") else ""
+        строки.append(f"  <code>{uid}</code>{имя} — <b>{v['роль']}</b>{сам}")
+        кнопки.append([{"text": f"{v['роль'][:4]}· {uid}{имя}",
+                        "callback_data": f"ac:{uid}"}])
+    строки += ["", "<b>Роли</b>"]
+    строки += [f"  <b>{r}</b> — {access.ОПИСАНИЕ[r]}" for r in access.РОЛИ]
+    строки += ["", "Нажми на человека, чтобы сменить роль или убрать.",
+               "Добавить: <code>/access 123456789 смотрящий</code>",
+               "<i>Свой id человек увидит, написав боту.</i>"]
+    say(chat, "\n".join(строки), inline=кнопки or None)
+
+
+def экран_человека(chat, uid):
+    v = access.все().get(str(uid))
+    if not v:
+        return say(chat, "Такого уже нет в списке.")
+    кнопки = [[{"text": f"→ {r}", "callback_data": f"ar:{uid}:{r}"}]
+              for r in access.РОЛИ if r != v["роль"]]
+    кнопки.append([{"text": "🚫 Убрать доступ", "callback_data": f"ax:{uid}"}])
+    say(chat, f"<code>{uid}</code>" + (f" {v['имя']}" if v.get("имя") else "")
+              + f"\nсейчас: <b>{v['роль']}</b>"
+                f"\nдобавлен: {v.get('когда', '—')[:16]}"
+                f" ({v.get('кто_добавил', '—')})",
+        inline=кнопки)
+
+
+def cmd_access_add(chat, args):
+    if not access.можно(chat, "доступ"):
+        return say(chat, "Управлять доступом может только админ.")
+    if not args:
+        return say(chat, "Формат: <code>/access 123456789 смотрящий</code>\n"
+                         "Роли: " + ", ".join(access.РОЛИ))
+    uid = re.sub(r"\D", "", args[0])
+    if not uid:
+        return say(chat, f"Не похоже на id: <b>{args[0]}</b>")
+    роль = args[1].lower() if len(args) > 1 else "смотрящий"
+    if роль not in access.РОЛИ:
+        return say(chat, f"Неизвестная роль: <b>{роль}</b>\n"
+                         "Есть: " + ", ".join(access.РОЛИ))
+    имя = " ".join(args[2:]) or None
+    access.добавить(uid, роль, кто=chat, имя=имя)
+    say(chat, f"✅ <code>{uid}</code> — <b>{роль}</b>\n"
+              f"<i>{access.ОПИСАНИЕ[роль]}</i>")
+    try:
+        say(int(uid), f"Тебе выдали доступ к боту Cappi Core.\n"
+                      f"Роль: <b>{роль}</b> — {access.ОПИСАНИЕ[роль]}\n\n"
+                      f"Напиши /start.")
+    except Exception:
+        pass
 
 
 def cmd_botstate(chat):
@@ -428,6 +490,9 @@ def _default_date():
 
 
 def prepare(chat, code, new_price, when, user):
+    if not access.можно(chat, "цены"):
+        return say(chat, "Менять цены может оператор или админ. "
+                         "У тебя роль «смотрящий».")
     """Готовим изменение и показываем карточку подтверждения. Ещё ничего не меняем."""
     hits = [h for h in find(code) if str(h[0]).lower() == str(code).lower()]
     if not hits:
@@ -545,7 +610,7 @@ def _send_daily(sent):
         return
     sent["day"] = now.date()
     текст = report.render(report.collect(), live=False)
-    for uid in ALLOWED:
+    for uid in access.подписчики_отчёта():
         try:
             say(uid, текст)
         except Exception:
@@ -572,7 +637,7 @@ def _зона_изменилась(e):
         if штат:
             строки.append(f"на смене: поваров {штат.get('cooks','?')}, "
                           f"курьеров {штат.get('couriers','?')}")
-    for uid in ALLOWED:
+    for uid in access.подписчики_отчёта():
         try:
             say(uid, "\n".join(строки))
         except Exception:
@@ -630,6 +695,29 @@ def on_button(q):
     act, _, arg = q["data"].partition(":")
     tg("answerCallbackQuery", callback_query_id=q["id"])
     who = q["from"].get("username") or str(q["from"]["id"])
+
+    if act == "ac":                                   # карточка человека
+        return экран_человека(chat, arg)
+
+    if act in ("ar", "ax"):                           # смена роли или удаление
+        if not access.можно(chat, "доступ"):
+            return say(chat, "Только админ.")
+        uid, _, новая = arg.partition(":")
+        try:
+            if act == "ax":
+                access.убрать(uid)
+                say(chat, f"🚫 Доступ у <code>{uid}</code> убран.")
+            else:
+                access.сменить_роль(uid, новая)
+                say(chat, f"✅ <code>{uid}</code> теперь <b>{новая}</b>")
+                try:
+                    say(int(uid), f"Твоя роль в боте изменена: <b>{новая}</b>\n"
+                                  f"<i>{access.ОПИСАНИЕ[новая]}</i>")
+                except Exception:
+                    pass
+        except Exception as e:
+            say(chat, f"❌ {e}")
+        return cmd_access(chat)
 
     if act == "it":                                   # выбрали позицию из списка
         hits = [h for h in find(arg) if str(h[0]) == arg]
@@ -727,6 +815,7 @@ def on_button(q):
     (r"^(связь|проверь подключ|healthcheck|что работает)",
      lambda chat, m, txt: cmd_healthcheck(chat)),
     (r"^(журнал|истори|кто мен)", lambda chat, m, txt: cmd_audit(chat)),
+    (r"^(доступ|прав|кто может)", lambda chat, m, txt: cmd_access(chat)),
     (r"^(помощ|что умеешь|команды|help)", lambda chat, m, txt: say(chat, HELP)),
 
     # то, чего ещё нет — честно говорим, а не молчим
@@ -883,10 +972,10 @@ def on_message(m):
     if not text or chat is None:
         return
     uid = m["from"]["id"]
-    if uid not in ALLOWED:
+    if not access.есть_доступ(uid):
         return say(chat, "Нет доступа.\n\nТвой id: <code>%d</code>\n"
-                         "Впиши его в TELEGRAM_ALLOWED_IDS в ~/.cappi/api.env "
-                         "и перезапусти бота." % uid, keys=False)
+                         "<i>Покажи его тому, у кого роль «админ» — "
+                         "он выдаст доступ из бота.</i>" % uid, keys=False)
     who = m["from"].get("username") or str(uid)
 
     if text.lower() in BUTTONS:
@@ -919,6 +1008,8 @@ def on_message(m):
     elif cmd in ("/report", "/итоги"):
         d = date.fromisoformat(args[0]) if args else None
         cmd_report(chat, d, live=not args)
+    elif cmd == "/access":
+        cmd_access_add(chat, args)
     elif cmd == "/plan":
         cmd_plan(chat, text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else "")
     elif cmd == "/set":
