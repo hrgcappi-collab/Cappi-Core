@@ -127,7 +127,8 @@ def zones_summary(day):
             минут = c.get("duration_min") or 0
             итог["ещё_закрыты"] += 1
         итог["минут"] += минут
-        район = c.get("district") or c.get("branch") or "—"
+        # branch у Котовского филиала null — тогда опираемся на район.
+        район = c.get("district") or c.get("branch") or "без района"
         r = итог["по_районам"].setdefault(район, {"раз": 0, "минут": 0})
         r["раз"] += 1
         r["минут"] += минут
@@ -155,21 +156,30 @@ def state():
     return _api("/zones/state")
 
 
-def pull(с=None, по=None):
-    """Забирает события за период и складывает к себе. Возвращает,
-    сколько оказалось новых."""
+def pull(с=None, по=None, шаг=7):
+    """Забирает события за период и складывает к себе.
+
+    Период режется на куски: за nginx у них таймаут 30 секунд, и запрос
+    за месяц одним разом в него не укладывается. Возвращает, сколько
+    событий оказалось новыми.
+    """
     с = с or datetime.now().date()
     по = по or с
-    r = _api(f"/zones/events?from={с}&to={по}&limit=10000")
-    if not r:
-        return 0
-    новых = 0
-    for e in r.get("data", []):
+    новых, начало = 0, с
+    while начало <= по:
+        конец = min(начало + timedelta(days=шаг - 1), по)
         try:
-            if save(e):
-                новых += 1
+            r = _api(f"/zones/events?from={начало}&to={конец}&limit=10000")
         except Exception:
+            начало = конец + timedelta(days=1)
             continue
+        for e in (r or {}).get("data", []):
+            try:
+                if save(e):
+                    новых += 1
+            except Exception:
+                continue
+        начало = конец + timedelta(days=1)
     return новых
 
 

@@ -157,7 +157,8 @@ def jamshut():
     st = webhook.state()
     закрыто = st.get("count", 0)
     события = len(webhook.events(None))
-    return (f"зон закрыто сейчас: {закрыто} · "
+    хост = CFG["JAMSHUT_URL"].split("//")[-1].split("/")[0]
+    return (f"{хост} · зон закрыто сейчас: {закрыто} · "
             f"событий в истории: {события}")
 
 

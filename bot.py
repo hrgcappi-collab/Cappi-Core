@@ -619,50 +619,49 @@ def _send_daily(sent):
 
 
 def _зона_изменилась(e):
-    """Пришло событие от Джамшута — сообщаем сразу, не дожидаясь отчёта.
+    """Пришло событие о зоне — сообщаем сразу, не дожидаясь отчёта.
     Закрытая зона это деньги, которые не заработаются, пока она закрыта."""
     закрытие = e.get("event") == "zone.close"
-    район = e.get("district") or e.get("branch") or "—"
+    район = e.get("district") or "—"
+    филиал = e.get("branch") or "без филиала"      # у Котовского branch = null
     ctx = e.get("context") or {}
     штат = ctx.get("staff") or {}
+
     строки = [("🚧 <b>Зона закрыта</b>" if закрытие else "✅ <b>Зона открыта</b>"),
-              f"{район} · {e.get('branch','—')}"]
-    if закрытие and e.get("duration_min"):
-        строки.append(f"на {e['duration_min']} мин")
-    кто = "автоматически" if e.get("auto") else (e.get("actor") or "—")
-    строки.append(f"кто: {кто}")
+              f"{район} · {филиал}"]
+    if e.get("zone_ids"):
+        строки.append("зоны: " + ", ".join(str(z) for z in e["zone_ids"]))
+    if e.get("duration_min"):
+        строки.append(f"{'на' if закрытие else 'простояла'} {e['duration_min']} мин")
+
+    авто = e.get("auto") or e.get("source") == "bot"
+    строки.append("кто: " + ("автоматически" if авто else (e.get("actor") or "—")))
+
     if ctx:
-        строки.append("")
-        строки.append(f"в работе {ctx.get('in_work','?')} · "
-                      f"кухня {ctx.get('kitchen','?')} · в пути {ctx.get('onway','?')}")
+        строки += ["", f"в работе {ctx.get('in_work', '?')} · "
+                       f"кухня {ctx.get('kitchen', '?')} · "
+                       f"в пути {ctx.get('onway', '?')}"]
         if штат:
-            строки.append(f"на смене: поваров {штат.get('cooks','?')}, "
-                          f"курьеров {штат.get('couriers','?')}")
+            занято = штат.get("couriers_busy")
+            всего_кур = штат.get("couriers")
+            курьеры = (f"{занято}/{всего_кур}" if занято is not None and всего_кур
+                       else str(всего_кур or "?"))
+            хвост = [f"поваров {штат.get('cooks', '?')}", f"курьеров {курьеры}"]
+            if штат.get("admins") is not None:
+                хвост.append(f"админов {штат['admins']}")
+            строки.append("на смене: " + ", ".join(хвост))
+            if штат.get("orders_on_couriers") is not None:
+                строки.append(f"заказов на курьерах: {штат['orders_on_couriers']}")
+    else:
+        # context приходит неполным, если Syrve не ответил — молчать об
+        # этом нельзя, иначе пустота читается как «всё спокойно».
+        строки += ["", "<i>обстановка недоступна — Syrve не ответил</i>"]
+
     for uid in access.подписчики_отчёта():
         try:
             say(uid, "\n".join(строки))
         except Exception:
             pass
-
-
-def _pull_zones(последний):
-    """Раз в пять минут забираем у Джамшута новые события о зонах.
-
-    Опрос, а не только вебхук: пуш требует публичного адреса, которого у
-    бота пока нет. Хранилище и отпечаток общие, поэтому если позже включим
-    и вебхук, история не задвоится.
-    """
-    if time.time() - последний[0] < 300:
-        return
-    последний[0] = time.time()
-    try:
-        было = {e["_fp"] for e in webhook.events(date.today())}
-        webhook.pull()
-        for e in webhook.events(date.today()):
-            if e["_fp"] not in было:
-                _зона_изменилась(e)
-    except Exception:
-        traceback.print_exc()
 
 
 def watcher():
