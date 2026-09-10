@@ -81,16 +81,16 @@ def find(query):
         key=lambda x: x[1]["name"])
 
 
-def where_shown(name):
-    """Что показывают витрины. Медленно — только по явному запросу."""
-    n = cappi.norm(name)
+def where_shown(guid, name):
+    """Что показывают витрины. Сайт — точно по guid, Glovo — по названию."""
     site = glovo = None
     try:
-        site = cappi.site_prices().get(n)
+        row = cappi.site_prices().get(guid)
+        site = row["price"] if row else None
     except Exception:
         pass
     try:
-        glovo = cappi.glovo_prices().get(n)
+        glovo = cappi.glovo_prices().get(cappi.norm(name))
     except Exception:
         pass
     return site, glovo
@@ -153,20 +153,21 @@ def cmd_price(chat, query):
 
 def cmd_check(chat):
     say(chat, "Сверяю Syrve ↔ сайт ↔ Glovo, это займёт минуту…")
-    syr = {cappi.norm(v["name"]): (v["price"], k)
-           for k, v in cappi.cloud_prices().items() if v["in_menu"]}
+    syr = {k: v for k, v in cappi.cloud_prices().items() if v["in_menu"]}
     site, glovo = cappi.site_prices(), cappi.glovo_prices()
     bad = []
-    for n, (price, code) in sorted(syr.items()):
-        s, g = site.get(n), glovo.get(n)
+    for code, v in sorted(syr.items(), key=lambda x: x[1]["name"]):
+        row = site.get(v["id"])                       # сайт — точно по guid
+        s = row["price"] if row else None
+        g = glovo.get(cappi.norm(v["name"]))          # Glovo — только по названию
         if s is None and g is None:
             continue
-        if (s is not None and s != price) or (g is not None and abs(g - price) > 0.01):
-            bad.append(f"<code>{code}</code> {n[:34]}\n"
-                       f"     Syrve <b>{fmt(price)}</b> · сайт {fmt(s) if s is not None else '—'}"
+        if (s is not None and s != v["price"]) or (g is not None and abs(g - v["price"]) > 0.01):
+            bad.append(f"<code>{code}</code> {v['name'][:34]}\n"
+                       f"     Syrve <b>{fmt(v['price'])}</b> · сайт {fmt(s) if s is not None else '—'}"
                        f" · Glovo {fmt(g) if g is not None else '—'}")
     head = (f"Syrve {len(syr)} · сайт {len(site)} · Glovo {len(glovo)}\n"
-            f"<i>сравнивается только то, что удалось сопоставить по названию</i>\n\n")
+            f"<i>сайт сверяется по артикулу, Glovo — по названию</i>\n\n")
     say(chat, head + ("❌ <b>Расхождения</b>\n\n" + "\n".join(bad[:25])
                       if bad else "✅ Расхождений нет"))
 
@@ -230,6 +231,7 @@ def do_change(c):
           f'с {c["date"]}\tприказ №{doc["documentNumber"]}')
     items = load_pending()
     items.append({**{k: c[k] for k in ("code", "name", "price", "old", "chat")},
+                  "guid": c["pid"],
                   "doc": doc["documentNumber"],
                   "due": (datetime.now() + timedelta(minutes=CHECK_AFTER_MIN)).isoformat()})
     save_pending(items)
@@ -246,7 +248,7 @@ def watcher():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
                     keep.append(it)
                     continue
-                site, glovo = where_shown(it["name"])
+                site, glovo = where_shown(it.get("guid", ""), it["name"])
                 p = it["price"]
                 ok_site = site is not None and abs(site - p) < 0.01
                 ok_glovo = glovo is not None and abs(glovo - p) < 0.01
@@ -295,7 +297,7 @@ def on_button(q):
             return say(chat, "Позиция пропала из меню.")
         _, p = hits[0]
         say(chat, "Смотрю витрины…")
-        s, g = where_shown(p["name"])
+        s, g = where_shown(p["id"], p["name"])
         m = lambda v: fmt(v) if v is not None else "не нашёл"
         return say(chat, f"<b>{p['name']}</b>\n\n"
                          f"Syrve:  <b>{fmt(p['price'])} ₴</b>\n"

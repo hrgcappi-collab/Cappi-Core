@@ -126,7 +126,8 @@ def site():
     if not p:
         raise RuntimeError("страницы открылись, но цены не распознались — "
                            "возможно, поменялась вёрстка сайта")
-    return f"cappi.ua · разобрано позиций: {len(p)}"
+    disc = sum(1 for v in p.values() if v["cross"])
+    return f"cappi.ua · позиций {len(p)}" + (f", со скидкой {disc}" if disc else "")
 
 
 def glovo():
@@ -159,12 +160,14 @@ def telegram():
 # ------------------------------------------------------------- Сводка цен
 def consistency():
     """Главная проверка: сходятся ли цены в Syrve, на сайте и в Glovo."""
-    syr = {cappi.norm(v["name"]): v["price"]
-           for v in cappi.cloud_prices().values() if v["in_menu"]}
+    syr = [v for v in cappi.cloud_prices().values() if v["in_menu"]]
     s, g = cappi.site_prices(), cappi.glovo_prices()
-    bad = [n for n, price in syr.items()
-           if (s.get(n) is not None and s[n] != price)
-           or (g.get(n) is not None and abs(g[n] - price) > 0.01)]
+    bad = []
+    for v in syr:
+        row = s.get(v["id"])
+        gl = g.get(cappi.norm(v["name"]))
+        if (row and row["price"] != v["price"]) or (gl is not None and abs(gl - v["price"]) > 0.01):
+            bad.append(v["name"])
     if bad:
         raise RuntimeError(f"расходятся {len(bad)} позиций — подробности: "
                            f"python3 check_prices.py")

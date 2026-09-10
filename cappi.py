@@ -6,10 +6,10 @@ from html import unescape
 ENV = os.path.expanduser("~/.cappi/api.env")
 UA = {"User-Agent": "Mozilla/5.0"}
 
-SITE_CATS = ["roli", "tempura-roli", "zapeceni-roli", "roli-bez-risu", "seti",
-             "pica", "bouli", "supi", "salati", "zakuski", "deserti", "napoyi",
-             "wok", "kombo", "onigiri", "susirito", "susi-burgeri", "bao-burgeri",
-             "sprinh-rol-1", "promo", "aktsiya-misyatsya-1"]
+# Сайт отдаёт всё меню одним JSON. Ключевое — поле api_guid: это ровно
+# productId из Syrve, так что сверять можно точно, а не угадывать по названиям.
+SITE_MENU_URL = "https://api.cappi.ua/api/v2/categories/{city}"
+SITE_CITY = "1"                       # Одесса
 GLOVO_URL = "https://glovoapp.com/uk/ua/odesa/stores/cappi-ods"
 
 
@@ -155,6 +155,7 @@ def cloud_prices():
         sp = (p.get("sizePrices") or [{}])[0].get("price") or {}
         if sp.get("currentPrice") is not None:
             out[p.get("code") or p["id"]] = {
+                "id": p["id"],              # тот же guid, что api_guid на сайте
                 "name": p["name"],
                 "price": sp["currentPrice"],
                 "in_menu": sp.get("isIncludedInMenu"),
@@ -165,17 +166,31 @@ def cloud_prices():
 
 
 # ------------------------------------------------------------- Сайт и Glovo
-def site_prices():
+def site_menu(city=SITE_CITY):
+    """Всё меню сайта одним запросом: категории с товарами."""
+    return json.loads(_get(SITE_MENU_URL.format(city=city), timeout=90))
+
+
+def site_prices(city=SITE_CITY):
+    """{guid: {name, price, cross}} — сверка по guid, без угадывания по названию.
+
+    `cross` — перечёркнутая «старая цена» для бейджа скидки; 0 значит скидки нет.
+    """
     out = {}
-    for cat in SITE_CATS:
-        try:
-            h = _get(f"https://cappi.ua/odesa/{cat}", timeout=40)
-        except Exception:
-            continue
-        for m in re.finditer(
-                r'goods__name">(.*?)</div>.*?goods-price__actual">\s*([\d\s]+)\s*₴', h, re.S):
-            out[norm(m.group(1))] = int(re.sub(r"\D", "", m.group(2)))
+    for cat in site_menu(city):
+        for it in cat.get("items", []):
+            g = it.get("api_guid")
+            if g:
+                out[g] = {"name": it.get("name", ""),
+                          "price": it.get("price"),
+                          "cross": it.get("price_cross") or 0,
+                          "category": cat.get("name")}
     return out
+
+
+def site_prices_by_name(city=SITE_CITY):
+    """То же, но ключом название — нужно для Glovo, где guid нет."""
+    return {norm(v["name"]): v["price"] for v in site_prices(city).values()}
 
 
 def glovo_prices():

@@ -60,16 +60,9 @@ def syrve_prices():
 
 
 def site_prices():
-    out = {}
-    for cat in SITE_CATS:
-        try:
-            h = get(f"https://cappi.ua/odesa/{cat}")
-        except Exception:
-            continue
-        for m in re.finditer(
-            r'goods__name">(.*?)</div>.*?goods-price__actual">\s*([\d\s]+)\s*₴', h, re.S):
-            out[norm(m.group(1))] = int(re.sub(r"\D", "", m.group(2)))
-    return out
+    """Сайт отдаёт меню одним JSON; api_guid = productId в Syrve."""
+    import cappi
+    return cappi.site_prices()
 
 
 def glovo_prices():
