@@ -32,7 +32,7 @@ import hashlib
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cappi
@@ -132,6 +132,45 @@ def zones_summary(day):
         r["раз"] += 1
         r["минут"] += минут
     return итог
+
+
+# ------------------------------------------------------------------- опрос
+# Второй способ получить те же события: сходить к Джамшуту самим. Он нужен,
+# потому что вебхуку требуется публичный адрес, а бот пока живёт на ноутбуке.
+# Оба пути пишут в одно хранилище и отсекаются одним отпечатком, так что
+# включённые одновременно они не задваивают историю.
+
+def _api(path):
+    c = cappi.cfg()
+    if not c.get("JAMSHUT_TOKEN"):
+        return None
+    return json.loads(cappi._get(
+        c["JAMSHUT_URL"].rstrip("/") + path,
+        {"Authorization": f"Bearer {c['JAMSHUT_TOKEN']}"}, timeout=40))
+
+
+def state():
+    """Какие зоны закрыты прямо сейчас — по данным Джамшута, а не по нашей
+    истории: он знает и о том, что было до того, как мы начали слушать."""
+    return _api("/zones/state")
+
+
+def pull(с=None, по=None):
+    """Забирает события за период и складывает к себе. Возвращает,
+    сколько оказалось новых."""
+    с = с or datetime.now().date()
+    по = по or с
+    r = _api(f"/zones/events?from={с}&to={по}&limit=10000")
+    if not r:
+        return 0
+    новых = 0
+    for e in r.get("data", []):
+        try:
+            if save(e):
+                новых += 1
+        except Exception:
+            continue
+    return новых
 
 
 # ------------------------------------------------------------------- сервер

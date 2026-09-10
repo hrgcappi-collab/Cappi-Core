@@ -578,12 +578,34 @@ def _зона_изменилась(e):
             pass
 
 
+def _pull_zones(последний):
+    """Раз в пять минут забираем у Джамшута новые события о зонах.
+
+    Опрос, а не только вебхук: пуш требует публичного адреса, которого у
+    бота пока нет. Хранилище и отпечаток общие, поэтому если позже включим
+    и вебхук, история не задвоится.
+    """
+    if time.time() - последний[0] < 300:
+        return
+    последний[0] = time.time()
+    try:
+        было = {e["_fp"] for e in webhook.events(date.today())}
+        webhook.pull()
+        for e in webhook.events(date.today()):
+            if e["_fp"] not in было:
+                _зона_изменилась(e)
+    except Exception:
+        traceback.print_exc()
+
+
 def watcher():
-    """Догоняет отложенные проверки и присылает итоги дня."""
+    """Догоняет отложенные проверки, опрашивает Джамшута, шлёт итоги дня."""
     sent = {}
+    последний_опрос = [0.0]
     while True:
         try:
             _send_daily(sent)
+            _pull_zones(последний_опрос)
             keep = []
             for it in load_pending():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
@@ -726,11 +748,22 @@ def команда_цены(chat, что, цена):
 
 
 def cmd_zones(chat, day=None):
+    строки = []
+    try:
+        st = webhook.state()
+        if st and st.get("count"):
+            строки += [f"🔴 <b>Сейчас закрыто зон: {st['count']}</b>",
+                       "    " + ", ".join(str(z) for z in st.get("closed", [])), ""]
+        elif st:
+            строки += ["🟢 Сейчас все зоны открыты", ""]
+    except Exception as e:
+        строки += [f"<i>Состояние зон недоступно: {str(e)[:80]}</i>", ""]
+
     з = webhook.zones_summary(day or date.today())
     if not з["закрытий"]:
-        return say(chat, "Сегодня зоны не закрывали.")
-    строки = [f"🚧 <b>Закрытий зон: {з['закрытий']}</b> · "
-              f"{з['минут'] / 60:.1f} ч суммарно", ""]
+        return say(chat, "\n".join(строки + ["Сегодня зоны не закрывали."]))
+    строки += [f"🚧 <b>Закрытий зон сегодня: {з['закрытий']}</b> · "
+               f"{з['минут'] / 60:.1f} ч суммарно", ""]
     for район, r in sorted(з["по_районам"].items(), key=lambda x: -x[1]["минут"]):
         строки.append(f"  {район} — {r['раз']} раз, {r['минут']:.0f} мин")
     if з["ещё_закрыты"]:

@@ -138,6 +138,16 @@ def glovo():
     return f"Glovo · разобрано позиций: {len(p)}"
 
 
+def jamshut():
+    need("JAMSHUT_URL", "JAMSHUT_TOKEN")
+    import webhook
+    st = webhook.state()
+    закрыто = st.get("count", 0)
+    события = len(webhook.events(None))
+    return (f"зон закрыто сейчас: {закрыто} · "
+            f"событий в истории: {события}")
+
+
 def cappi_admin():
     need("CAPPI_ADMIN_URL")
     if not CFG.get("CAPPI_ADMIN_TOKEN"):
@@ -182,6 +192,7 @@ CHECKS = [
     ("Syrve Cloud — стоп-листы", stop_lists),
     ("Сайт cappi.ua", site),
     ("Glovo", glovo),
+    ("Джамшут (зоны)", jamshut),
     ("Cappi Admin", cappi_admin),
     ("Telegram-бот", telegram),
     ("Сходимость цен", consistency),
