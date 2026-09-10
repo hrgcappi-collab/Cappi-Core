@@ -1311,8 +1311,10 @@ def cmd_cancels(chat):
     строки = [f"❌ <b>Отмен сегодня: {sum(от.values())}</b>"]
     строки += [f"    {п} — {n}" for п, n in sorted(от.items(), key=lambda x: -x[1])]
     if уд:
-        строки += ["", "🗑 <b>Удаления блюд</b>"]
-        строки += [f"    {п} — {n}" for п, n in sorted(уд.items(), key=lambda x: -x[1])]
+        строки += ["", f"🗑 <b>Удалено блюд: {sum(v['штук'] for v in уд.values()):.0f}</b>"]
+        for п, v in sorted(уд.items(), key=lambda x: -x[1]["штук"]):
+            деньги = f", {report.money(v['сумма'])} ₴" if v["сумма"] else ""
+            строки.append(f"    {п} — {v['штук']:.0f}{деньги}")
     say(chat, "\n".join(строки))
 
 

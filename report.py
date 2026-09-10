@@ -318,10 +318,22 @@ def deletions(s, day, всё=False):
 
 
 def removals(s, day):
-    """Удаления блюд по причинам — соседний показатель, часто нужен вместе."""
-    rows = _olap(s, day, ["RemovalType"], ["UniqOrderId"])
-    return {r["RemovalType"]: r.get("UniqOrderId", 0)
-            for r in rows if r.get("RemovalType")}
+    """Удаления блюд по причинам — соседний показатель, часто нужен вместе.
+
+    Считаем блюда, а не чеки. Раньше здесь стояло UniqOrderId, и десять
+    блюд, удалённых одним чеком, показывались как «1»: заголовок обещал
+    блюда, а число отвечало на другой вопрос.
+    """
+    rows = _olap(s, day, ["RemovalType"], ["DishAmountInt", "DishSumInt"])
+    out = {}
+    for r in rows:
+        причина = r.get("RemovalType")
+        if not причина:
+            continue
+        цель = out.setdefault(причина, {"штук": 0, "сумма": 0})
+        цель["штук"] += r.get("DishAmountInt", 0) or 0
+        цель["сумма"] += r.get("DishSumInt", 0) or 0
+    return out
 
 
 # ------------------------------------------------------------------- явки
@@ -534,9 +546,11 @@ def render(d, live=False):
         строки += ["", "❌ Отмен: <b>0</b>"]
 
     if d["удаления"]:
-        строки += ["", "🗑 Удаления блюд:"]
-        for причина, n in sorted(d["удаления"].items(), key=lambda x: -x[1]):
-            строки.append(f"    {причина} — {n}")
+        всего = sum(v["штук"] for v in d["удаления"].values())
+        строки += ["", f"🗑 Удалено блюд: <b>{всего:.0f}</b>"]
+        for причина, v in sorted(d["удаления"].items(), key=lambda x: -x[1]["штук"]):
+            деньги = f", {money(v['сумма'])} ₴" if v["сумма"] else ""
+            строки.append(f"    {причина} — {v['штук']:.0f}{деньги}")
 
     ак = d.get("акции") or {}
     if ак.get("позиций"):
