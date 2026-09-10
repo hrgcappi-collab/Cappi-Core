@@ -22,6 +22,7 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 STATE_DIR = os.path.expanduser("~/.cappi")
 PENDING = os.path.join(STATE_DIR, "pending.json")   # отложенные проверки витрин
 AUDIT = os.path.join(STATE_DIR, "changes.log")      # журнал изменений цен
+UNKNOWN = os.path.join(STATE_DIR, "unknown.log")    # что бот не понял — на ревизию
 
 REPORT_AT = "22:00"         # когда присылать итоги дня
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
@@ -50,7 +51,8 @@ _lock = threading.Lock()
                    ["🎯 План"],
                    ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
-                ["👥 Доступ", "🤖 Состояние бота"],
+                ["🗣 Непонятые", "👥 Доступ"],
+                ["🤖 Состояние бота"],
                 ["◀️ Назад"]],
 }
 
@@ -640,6 +642,106 @@ def on_button(q):
 
 
 # ------------------------------------------------------------------ сообщения
+# Текстовые команды. Смысл не в том, чтобы угадать все формулировки — это
+# невозможно, — а в том, чтобы покрыть ходовые, а остальное записать в
+# unknown.log и раз в пару дней разобрать. Порядок важен: первое совпадение
+# выигрывает, поэтому узкие правила стоят выше широких.
+ФРАЗЫ = [
+    # показатели
+    (r"^(выручк|показател|как дела|что по деньгам|итог|сводк|результат)",
+     lambda chat, m, txt: cmd_report(chat, None, live=True)),
+    (r"(за )?вчера", lambda chat, m, txt: cmd_report(
+        chat, date.today() - timedelta(days=1), live=False)),
+    (r"^(за )?(позавчера)", lambda chat, m, txt: cmd_report(
+        chat, date.today() - timedelta(days=2), live=False)),
+    (r"^(за )?(\d{1,2})\.(\d{1,2})(\.(\d{4}))?$",
+     lambda chat, m, txt: cmd_report(
+         chat, date(int(m.group(5) or date.today().year),
+                    int(m.group(3)), int(m.group(2))), live=False)),
+    (r"^(план|сколько нужно|сколько надо)", lambda chat, m, txt: cmd_plan(chat, "")),
+    (r"(в работе|сейчас готов|активные заказ|что готовится)",
+     lambda chat, m, txt: cmd_live(chat)),
+    (r"^(отмен|сколько отмен|причины отмен)", lambda chat, m, txt: cmd_cancels(chat)),
+
+    # цены
+    (r"^(сверк|проверь цен|расхожден|сравни цен)", lambda chat, m, txt: cmd_check(chat)),
+    (r"^(помен|измен|постав|обнов)\w*\s+цен\w*\s+(?:на\s+)?(.+?)\s+(?:на|=|до)\s+(\d+)",
+     lambda chat, m, txt: команда_цены(chat, m.group(2), m.group(3))),
+    (r"^(скольк[оа] стоит|цена|почём|почем|сколько за)\s+(.+)",
+     lambda chat, m, txt: cmd_price(chat, m.group(2))),
+    (r"^(найди|поиск|покажи)\s+(.+)", lambda chat, m, txt: cmd_price(chat, m.group(2))),
+    (r"^(на проверке|что проверя|очеред)", lambda chat, m, txt: cmd_pending(chat)),
+
+    # админское
+    (r"^(связь|проверь подключ|healthcheck|что работает)",
+     lambda chat, m, txt: cmd_healthcheck(chat)),
+    (r"^(журнал|истори|кто мен)", lambda chat, m, txt: cmd_audit(chat)),
+    (r"^(помощ|что умеешь|команды|help)", lambda chat, m, txt: say(chat, HELP)),
+
+    # то, чего ещё нет — честно говорим, а не молчим
+    (r"^(жалоб|негатив|отзыв)", lambda chat, m, txt: say(
+        chat, "Жалобы пока не подключены — жду доступ к Loopa.")),
+    (r"^(зон|закрыт)", lambda chat, m, txt: say(
+        chat, "Закрытые зоны пока не подключены — жду доступ к Джамшуту.")),
+]
+
+
+def команда_цены(chat, что, цена):
+    """«поменяй цену садочок на 46» — находим позицию и предлагаем подтвердить."""
+    hits = find(что)
+    if not hits:
+        return say(chat, f"Не нашёл: <b>{что}</b>")
+    if len(hits) > 1:
+        return say(chat, f"Нашёл {len(hits)} — уточни, какую менять:", inline=[
+            [{"text": f"{fmt(p['price'])} ₴ · {p['name'][:32]}",
+              "callback_data": f"ed:{code}"}] for code, p in hits[:12]])
+    return prepare(chat, hits[0][0], float(цена), _default_date(), "текст")
+
+
+def cmd_live(chat):
+    """Только живые заказы — без остального отчёта, когда спрашивают про них."""
+    ж = report.live_orders()
+    строки = [f"🚚 <b>В работе: {ж['в_работе']}</b> из {ж['всего']} за сегодня", ""]
+    for st, n in sorted(ж["статусы"].items(), key=lambda x: -x[1]):
+        строки.append(f"    {st} — {n}" + ("  ←" if st in report.В_РАБОТЕ else ""))
+    say(chat, "\n".join(строки))
+
+
+def cmd_cancels(chat):
+    with cappi.Syrve() as s:
+        от = report.cancels(s, date.today())
+        уд = report.removals(s, date.today())
+    строки = [f"❌ <b>Отмен сегодня: {sum(от.values())}</b>"]
+    строки += [f"    {п} — {n}" for п, n in sorted(от.items(), key=lambda x: -x[1])]
+    if уд:
+        строки += ["", "🗑 <b>Удаления блюд</b>"]
+        строки += [f"    {п} — {n}" for п, n in sorted(уд.items(), key=lambda x: -x[1])]
+    say(chat, "\n".join(строки))
+
+
+def не_понял(chat, текст, кто):
+    """Записываем непонятое — это материал для ревизии, а не мусор."""
+    with open(UNKNOWN, "a") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{кто}\t{текст[:200]}\n")
+
+
+def cmd_unknown(chat, n=25):
+    """Что бот не понял — экран для ревизии раз в пару дней."""
+    try:
+        строки = open(UNKNOWN).read().strip().splitlines()
+    except FileNotFoundError:
+        строки = []
+    if not строки:
+        return say(chat, "Непонятых запросов нет — всё, что писали, бот разобрал.")
+    from collections import Counter
+    тексты = Counter(s.split("\t")[-1].strip().lower() for s in строки)
+    out = [f"<b>Непонятые запросы</b> — всего {len(строки)}", ""]
+    for текст, раз in тексты.most_common(n):
+        out.append(f"  <code>{текст[:60]}</code>" + (f"  ×{раз}" if раз > 1 else ""))
+    out += ["", "<i>Разберём на ревизии: что из этого стоит добавить командой.</i>"]
+    say(chat, "\n".join(out))
+
+
 def открыть(chat, модуль, текст):
     _menu[chat] = модуль
     say(chat, текст)
@@ -670,6 +772,7 @@ BUTTONS = {
     "🔌 проверка связи": cmd_healthcheck,
     "📜 журнал цен": cmd_audit,
     "👥 доступ": cmd_access,
+    "🗣 непонятые": cmd_unknown,
     "🤖 состояние бота": cmd_botstate,
 }
 
@@ -740,7 +843,18 @@ def on_message(m):
         # Вставили таблицу плана — понятно и без команды.
         cmd_plan(chat, text)
     else:
-        # Любой текст — это поиск. Так естественнее, чем отчитывать за команду.
+        низ = text.strip().lower()
+        for шаблон, действие in ФРАЗЫ:
+            m = re.search(шаблон, низ)
+            if m:
+                return действие(chat, m, text)
+        # Не команда — считаем поиском. Если и поиск пуст, запись пойдёт
+        # в unknown.log: значит человек хотел чего-то, чего бот не умеет.
+        if not find(text):
+            не_понял(chat, text, who)
+            return say(chat, f"Не понял: <b>{text[:60]}</b>\n"
+                             f"<i>Записал — разберём на ревизии. "
+                             f"Пока попробуй кнопки или /help.</i>")
         cmd_price(chat, text)
 
 
