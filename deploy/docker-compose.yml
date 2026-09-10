@@ -1,20 +1,21 @@
-# Ставится рядом с CappiX, на тот же сервер. Отдельная сеть не нужна:
-# наружу торчит только вебхук, и его публикует Caddy.
+# Запуск:  docker compose up -d --build
 services:
   cappi-core:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+    image: cappi-core
     container_name: cappi-core
-    restart: unless-stopped
+    restart: unless-stopped        # поднимется сам после ребута сервера
+    ports:
+      # Только localhost, как у соседнего бота: наружу приёмник событий
+      # пойдёт через nginx с TLS, если понадобится. Сейчас события зон
+      # забираются опросом, и порт нужен на будущее.
+      - "127.0.0.1:8787:8787"
     volumes:
-      # Конфиг и состояние живут на хосте: переживают пересборку образа.
-      - /opt/cappi-core/state:/root/.cappi
-    environment:
-      TZ: Europe/Kyiv        # учётный день и время отчёта считаются по Киеву
-    networks:
-      - cappix_default       # чтобы Caddy из CappiX мог достучаться
-
-networks:
-  cappix_default:
-    external: true
+      # Состояние на хосте: конфиг с доступами, план, журнал цен, роли,
+      # события зон. Внутри образа оно стиралось бы при каждой пересборке,
+      # а журнал цен ценен именно на длинной дистанции.
+      # Путь от папки с этим файлом, а не от корня проекта: ./data здесь
+      # означало бы deploy/data, и конфиг в контейнер не попал бы.
+      - ../data:/root/.cappi

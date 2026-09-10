@@ -1,71 +1,63 @@
 # Развёртывание Cappi Core
 
-Ставится на тот же сервер, где живёт CappiX — Hetzner, доступ `ssh cappix-prod`.
-Отдельный сервер заводить незачем: бот занимает десятки мегабайт, а Caddy там
-уже умеет выдавать сертификаты.
+Бот живёт на том же сервере, что и Джамшут: `185.233.119.239`, пользователь
+`botdev`, каталог `~/app/cappi-core`. Схема повторяет соседний бот — docker
+compose, состояние на хосте, порт только на localhost.
 
-## Что нужно до начала
-
-1. **DNS**: запись `core.cappi.ua` → тот же IP, что у `cappix.cappi.ua`.
-2. **Доступ** к серверу с той машины, откуда деплоим.
-
-## Установка
+## Обновить код
 
 ```bash
-ssh cappix-prod
+# с машины разработчика
+rsync -az --delete --exclude '.git' --exclude '__pycache__' \
+      --exclude 'menu.json' --exclude '*.log' --exclude 'data' \
+      ~/code/Cappi-Core/ cappi-bot:~/app/cappi-core/
 
-# код
-git clone git@github.com:hrgcappi-collab/Cappi-Core.git /opt/cappi-core/repo
-mkdir -p /opt/cappi-core/state
-
-# конфиг: скопировать api.env.example и заполнить
-cp /opt/cappi-core/repo/api.env.example /opt/cappi-core/state/api.env
-chmod 600 /opt/cappi-core/state/api.env
-nano /opt/cappi-core/state/api.env
-
-# запуск
-cd /opt/cappi-core/repo
-docker compose -f deploy/docker-compose.yml up -d --build
+ssh cappi-bot 'cd ~/app/cappi-core && \
+  docker compose -f deploy/docker-compose.yml up -d --build'
 ```
 
-Затем дописать `deploy/Caddyfile.snippet` в `infra/prod/Caddyfile` проекта
-CappiX и перезагрузить Caddy:
+## Посмотреть, что происходит
 
 ```bash
-docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+ssh cappi-bot 'docker logs cappi-core --tail 50 -f'
+ssh cappi-bot 'docker ps'
+curl -s http://127.0.0.1:8787/health     # с самого сервера
 ```
 
-## Проверка
+## Где что лежит
 
-```bash
-curl https://core.cappi.ua/health
-# {"ok": true, "service": "cappi-core"}
-```
+    ~/app/cappi-core/          код
+    ~/app/cappi-core/data/     состояние, монтируется в контейнер как ~/.cappi
+        api.env                все доступы
+        access.json            кто и с какой ролью
+        plan.json              планы выручки
+        changes.log            журнал смен цен
+        special.json           спецпредложение
+        zone_events.jsonl      события зон от Джамшута
+        stoplist.json          слепок стоп-листа для алертов
 
-Этот же адрес отдать разработчику Джамшута:
+`data/` не попадает в git и не переносится rsync'ом — она живёт только на
+сервере.
 
-```
-CORE_WEBHOOK_URL=https://core.cappi.ua/webhook/zones
-CORE_WEBHOOK_TOKEN=<из api.env>
-```
+## Две вещи, о которых легко забыть
 
-## Обновление
+**Второй экземпляр.** Telegram отдаёт каждое сообщение одному опрашивающему.
+Если бот запущен и на сервере, и на ноутбуке, они будут перехватывать
+сообщения по очереди, и половина ответов придёт от старой версии. Перед
+запуском на сервере локальный надо остановить.
 
-```bash
-ssh cappix-prod
-cd /opt/cappi-core/repo && git pull
-docker compose -f deploy/docker-compose.yml up -d --build
-```
+**Часовой пояс.** `TZ=Europe/Kyiv` задан в образе. На UTC отчёт «в 22:00»
+уходил бы в час ночи, а «сегодня» менялось бы посреди вечерней смены.
 
-## Почему состояние на хосте
+## Приём событий от Джамшута
 
-`/opt/cappi-core/state` монтируется в контейнер как `~/.cappi`. Там лежат
-конфиг с доступами, план, журнал смен цен, очередь проверок и события зон.
-Если держать это внутри образа, пересборка стирала бы историю — а журнал
-цен нужен именно на длинной дистанции.
+Сейчас события зон забираются опросом раз в пять минут — работает без
+публичного адреса. Приёмник вебхука поднят на `127.0.0.1:8787` и проверен;
+включить пуш можно двумя способами:
 
-## Часовой пояс
+1. **Через nginx**, как сделан API Джамшута: маршрут наружу на
+   `https://api.cappi.ua/core/webhook/zones` → `127.0.0.1:8787`.
+2. **Напрямую между контейнерами** — оба бота на одном сервере, так что
+   внешний адрес не нужен вовсе. Понадобится общая docker-сеть.
 
-`TZ=Europe/Kyiv` задан осознанно: по нему считается, когда слать отчёт в
-22:00, и какой день считать сегодняшним. На сервере в UTC отчёт уходил бы
-в час ночи, а «сегодня» менялось бы посреди вечерней смены.
+Второй способ короче и надёжнее: трафик не выходит наружу.
