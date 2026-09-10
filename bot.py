@@ -923,6 +923,21 @@ def on_button(q):
     tg("answerCallbackQuery", callback_query_id=q["id"])
     who = q["from"].get("username") or str(q["from"]["id"])
 
+    if act == "ag":                                   # выдать доступ по id
+        if not access.можно(chat, "доступ"):
+            return say(chat, "Только админ.")
+        uid, _, роль = arg.partition(":")
+        access.добавить(uid, роль, кто=chat)
+        say(chat, f"✅ <code>{uid}</code> — <b>{роль}</b>\n"
+                  f"<i>{access.ОПИСАНИЕ[роль]}</i>")
+        try:
+            say(int(uid), f"Тебе выдали доступ к боту Cappi Core.\n"
+                          f"Роль: <b>{роль}</b> — {access.ОПИСАНИЕ[роль]}\n\n"
+                          f"Напиши /start.")
+        except Exception:
+            pass
+        return
+
     if act == "zc":                                   # выбрали зону → на сколько
         зона = (jamshut.справочник_зон().get(int(arg)) or {}).get("name", arg)
         return say(chat, f"На сколько закрыть <b>{зона}</b>?", inline=[
@@ -1138,7 +1153,10 @@ def on_button(q):
     (r"^(план|сколько нужно|сколько надо)", lambda chat, m, txt: cmd_plan(chat, "")),
     (r"(в работе|сейчас готов|активные заказ|что готовится)",
      lambda chat, m, txt: cmd_live(chat)),
-    (r"^(отмен|сколько отмен|причины отмен)", lambda chat, m, txt: cmd_cancels(chat)),
+    # «Причина отмены» — спрашивали именно так, а правило начиналось с
+    # «отмен» и мимо проходило.
+    (r"(причин\w*\s+отмен|^отмен|сколько отмен)",
+     lambda chat, m, txt: cmd_cancels(chat)),
     (r"^(списан|удален|что списал)", lambda chat, m, txt: cmd_deletions(chat)),
     (r"^(акци|скидк|что по акци)", lambda chat, m, txt: cmd_promo(chat)),
     (r"^(спец|спецпредлож)", lambda chat, m, txt: cmd_special(chat)),
@@ -1158,7 +1176,8 @@ def on_button(q):
      lambda chat, m, txt: cmd_healthcheck(chat)),
     (r"^(журнал|истори|кто мен)", lambda chat, m, txt: cmd_audit(chat)),
     (r"^(доступ|прав|кто может)", lambda chat, m, txt: cmd_access(chat)),
-    (r"^(помощ|что умеешь|команды|help)", lambda chat, m, txt: say(chat, HELP)),
+    (r"^(помощ|что умеешь|команды|help|что это|что ты|как польз)",
+     lambda chat, m, txt: say(chat, HELP)),
 
     # то, чего ещё нет — честно говорим, а не молчим
     (r"^(жалоб|негатив|отзыв)", lambda chat, m, txt: cmd_complaints(chat)),
@@ -1748,6 +1767,17 @@ def on_message(m):
         cmd_plan(chat, text)
     else:
         низ = text.strip().lower()
+        if re.fullmatch(r"\d{7,12}", низ) and access.можно(chat, "доступ"):
+            # Админ прислал один telegram-id — почти наверняка «выдай ему
+            # доступ». Спрашиваем роль, а не отправляем в поиск блюд.
+            if низ in access.все():
+                return say(chat, f"<code>{низ}</code> уже есть — "
+                                 f"роль <b>{access.роль(низ)}</b>.",
+                           inline=[[{"text": "Открыть карточку",
+                                     "callback_data": f"ac:{низ}"}]])
+            return say(chat, f"Выдать доступ <code>{низ}</code>?\nКакая роль:",
+                       inline=[[{"text": r, "callback_data": f"ag:{низ}:{r}"}]
+                               for r in access.РОЛИ])
         for шаблон, действие in ФРАЗЫ:
             m = re.search(шаблон, низ)
             if m:
