@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -369,12 +370,25 @@ def attendance(s, day):
             "правки": правки}
 
 
+# Сотрудники и роли меняются раз в месяц, а запрашивались на каждый день
+# отдельно: экран «Правки явок» за неделю тянул их четырнадцать раз и
+# работал сорок пять секунд. Держим полчаса.
+_КЭШ = {}
+_КЭШ_ЖИВЁТ = 1800
+
+
 def _справочник(s, путь, тег):
+    ключ = (s.host, путь)
+    свежий = _КЭШ.get(ключ)
+    if свежий and time.time() - свежий[0] < _КЭШ_ЖИВЁТ:
+        return свежий[1]
     try:
         xml = cappi._get(f"{s.host}/resto/api/{путь}?key={s.key}", timeout=90)
-        return {x.findtext("id"): x.findtext("name") for x in ET.fromstring(xml).iter(тег)}
+        d = {x.findtext("id"): x.findtext("name") for x in ET.fromstring(xml).iter(тег)}
     except Exception:
-        return {}
+        return (свежий or (0, {}))[1]      # лучше устаревшее, чем пустое
+    _КЭШ[ключ] = (time.time(), d)
+    return d
 
 
 # ------------------------------------------------------------------- жалобы
