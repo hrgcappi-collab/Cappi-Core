@@ -286,10 +286,19 @@ def site_prices_by_name(city=SITE_CITY):
 
 
 def glovo_prices():
+    """Цены Glovo с карточек витрины.
+
+    У позиции со скидкой на карточке две цены: сначала зачёркнутая старая,
+    потом текущая. Брать первую попавшуюся значило сравнивать Syrve со
+    старой ценой и получать расхождение на ровном месте. Берём наименьшую:
+    акционная цена и есть та, по которой продают.
+    """
     h = _get(GLOVO_URL, timeout=60)
     out = {}
-    for m in re.finditer(r'<img alt="(.*?)"[^>]*>(.*?)(\d[\d\s ]*,\d\d)\s*₴', h, re.S):
-        if len(m.group(2)) < 3000:
-            out[norm(m.group(1))] = float(
-                re.sub(r"[\s ]", "", m.group(3)).replace(",", "."))
+    for m in re.finditer(r'<img alt="(.*?)"[^>]*>(.*?)(\d[\d\s\u00a0]*,\d\d)\s*₴', h, re.S):
+        if len(m.group(2)) >= 3000:
+            continue
+        имя = norm(m.group(1))
+        цена = float(re.sub(r"[\s\u00a0]", "", m.group(3)).replace(",", "."))
+        out[имя] = min(цена, out[имя]) if имя in out else цена
     return out

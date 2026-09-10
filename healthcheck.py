@@ -8,6 +8,7 @@ import hashlib
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,15 +27,14 @@ def check(name, fn):
     """Прогоняем одну проверку, ловим всё, меряем время."""
     t = time.time()
     try:
-        detail = fn()
-        results.append((OK, name, detail, time.time() - t))
+        return (OK, name, fn(), time.time() - t)
     except _Skip as e:
-        results.append((SKIP, name, str(e), 0))
+        return (SKIP, name, str(e), 0)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:120].replace("\n", " ")
-        results.append((FAIL, name, f"HTTP {e.code} · {body}", time.time() - t))
+        return (FAIL, name, f"HTTP {e.code} · {body}", time.time() - t)
     except Exception as e:
-        results.append((FAIL, name, f"{type(e).__name__}: {e}"[:150], time.time() - t))
+        return (FAIL, name, f"{type(e).__name__}: {e}"[:150], time.time() - t)
 
 
 class _Skip(Exception):
@@ -214,13 +214,17 @@ CHECKS = [
 def main():
     only = sys.argv[1].lower() if len(sys.argv) > 1 else None
     print("Проверяю доступы Cappi…\n")
-    for name, fn in CHECKS:
-        if only and only not in name.lower():
-            continue
-        # прогресс в stderr: в терминале видно, в лог/пайп не попадёт
-        print(f"  … {name}", end="\r", file=sys.stderr, flush=True)
-        check(name, fn)
-        mark, n, detail, dt = results[-1]
+    отобранные = [(n, f) for n, f in CHECKS
+                  if not only or only in n.lower()]
+    # Проверки независимы и почти целиком состоят из ожидания сети. По
+    # очереди они складывались в двадцать секунд — столько никто не ждёт,
+    # и связь просто перестают проверять.
+    with ThreadPoolExecutor(max_workers=len(отобранные) or 1) as пул:
+        готовые = list(пул.map(lambda з: check(з[0], з[1]), отобранные))
+    # Порядок вывода — как в списке, а не как повезло ответить: список
+    # читают глазами сверху вниз, и он должен быть одинаковым каждый раз.
+    for mark, n, detail, dt in готовые:
+        results.append((mark, n, detail, dt))
         print(f"  {mark} {n:<34} {detail}"
               + (f"  ({dt:.1f}с)" if dt > 2 else ""))
 

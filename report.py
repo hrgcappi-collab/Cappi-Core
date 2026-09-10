@@ -27,6 +27,7 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 import cappi
@@ -517,36 +518,54 @@ def live_orders(day=None):
 
 # ------------------------------------------------------------------- сборка
 def collect(day=None):
+    """Всё, из чего складывается отчёт за день.
+
+    Запросы идут параллельно: они друг от друга не зависят, а по очереди
+    складывались в полминуты ожидания на каждый просмотр отчёта. Syrve
+    отвечает на них одновременно без возражений.
+
+    Каждый кусок ловит свою ошибку сам: отвалившаяся Loopa не должна
+    оставлять человека вообще без выручки и заказов.
+    """
     day = day or date.today()
-    with cappi.Syrve() as s:
-        d = {"день": day, "продажи": sales(s, day), "точки": sales_by_point(s, day),
-             "отмены": cancels(s, day), "удаления": removals(s, day),
-             "месяц_факт": month_to_date(s, day),
-             "чеков": orders_count(s, day)}
+    d = {"день": day}
+
+    def безопасно(имя, функция, запасное=None):
         try:
-            import promo
-            св = promo.сводка(s, day, promo.акционные())
-            d["акции"] = {"сумма": св["сумма"], "доля": св["доля"],
-                          "позиций": len(св["позиции"]),
-                          "без_продаж": len(св["не_продавались"])}
-        except Exception:
-            d["акции"] = {}
-        try:
-            d["смена"] = attendance(s, day)
+            return имя, функция()
         except Exception as e:
-            d["смена"] = {"ошибка": str(e)[:100]}
-    try:
-        d["жалобы"] = complaints(day)
-    except Exception as e:
-        d["жалобы"] = {"ошибка": str(e)[:100]}
-    try:
-        d["живые"] = live_orders(day)
-    except Exception as e:
-        d["живые"] = {"ошибка": str(e)[:120]}
+            return имя, (запасное if запасное is not None
+                         else {"ошибка": str(e)[:120]})
+
+    with cappi.Syrve() as s:
+        задачи = [
+            ("продажи", lambda: sales(s, day)),
+            ("точки", lambda: sales_by_point(s, day)),
+            ("отмены", lambda: cancels(s, day)),
+            ("удаления", lambda: removals(s, day)),
+            ("месяц_факт", lambda: month_to_date(s, day)),
+            ("чеков", lambda: orders_count(s, day)),
+            ("смена", lambda: attendance(s, day)),
+            ("акции", lambda: _акции(s, day)),
+            ("жалобы", lambda: complaints(day)),
+            ("живые", lambda: live_orders(day)),
+        ]
+        with ThreadPoolExecutor(max_workers=len(задачи)) as пул:
+            for имя, значение in пул.map(lambda з: безопасно(з[0], з[1]), задачи):
+                d[имя] = значение
+
     d["зоны"] = webhook.zones_summary(day)
     d["план"], d["план_точки"], d["план_откуда"] = plan_for(day)
     d["месяц_план"], d["месяц_всего"] = месячный_план(day)
     return d
+
+
+def _акции(s, day):
+    import promo
+    св = promo.сводка(s, day, promo.акционные())
+    return {"сумма": св["сумма"], "доля": св["доля"],
+            "позиций": len(св["позиции"]),
+            "без_продаж": len(св["не_продавались"])}
 
 
 def money(v):
