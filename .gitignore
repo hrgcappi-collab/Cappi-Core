@@ -1,0 +1,12 @@
+# Секреты — никогда в репозиторий
+api.env
+*.env
+!api.env.example
+
+# Состояние бота
+pending.json
+changes.log
+
+__pycache__/
+*.pyc
+.DS_Store
