@@ -42,6 +42,7 @@ DEFAULT_TOMORROW = True
 СЕГОДНЯ_СЛОВА = ("сегодня", "сейчас", "today", "now", "срочно")
 
 _confirm = {}               # токен → подготовленное изменение
+_ссылки = {}                # короткий ключ → длинные идентификаторы
 _await = {}                 # чат → чего ждём от следующего сообщения
 _lock = threading.Lock()
 
@@ -116,6 +117,25 @@ def tg(method, **params):
     req = urllib.request.Request(f"{API}/{method}", data=data)
     with urllib.request.urlopen(req, timeout=70) as r:
         return json.loads(r.read())
+
+
+def ссылка(*части):
+    """Короткий ключ вместо длинных идентификаторов в callback_data.
+
+    Telegram отводит на неё 64 байта, а пара GUID — это 76: кнопка со
+    стоп-листом молча превращала весь экран в «HTTP 400 Bad Request».
+    Кладём значения в память и передаём номер.
+    """
+    ключ = str(len(_ссылки) % 100000)
+    _ссылки[ключ] = части
+    return ключ
+
+
+def развернуть(ключ, сколько=2):
+    части = _ссылки.get(ключ)
+    if not части:
+        return (None,) * сколько
+    return части
 
 
 def say(chat, text, inline=None, keys=True):
@@ -296,10 +316,11 @@ def screen_item(chat, code, p):
     if в_стопе:
         txt += "\n<b>🛑 в стопе:</b> " + ", ".join(s["точка"] for s in в_стопе)
         кнопки += [[{"text": f"▶️ Снять со стопа · {s['точка']}",
-                     "callback_data": f"sr:{p['id']}:{s['terminalGroupId']}"}]
+                     "callback_data": f"sr:{ссылка(p['id'], s['terminalGroupId'])}"}]
                    for s in в_стопе]
     else:
-        кнопки += [[{"text": f"🛑 В стоп · {имя}", "callback_data": f"sa:{p['id']}:{tid}"}]
+        кнопки += [[{"text": f"🛑 В стоп · {имя}",
+                     "callback_data": f"sa:{ссылка(p['id'], tid)}"}]
                    for tid, имя in stoplist.терминалы().items()
                    if имя not in ("Отменённый заказ",)]
     say(chat, txt, inline=кнопки)
@@ -995,7 +1016,9 @@ def on_button(q):
     if act in ("sr", "sa"):                           # снять / поставить в стоп
         if not access.можно(chat, "цены"):
             return say(chat, "Управлять стоп-листом может оператор или админ.")
-        pid, _, tid = arg.partition(":")
+        pid, tid = развернуть(arg)
+        if not pid:
+            return say(chat, "Кнопка устарела — открой стоп-лист заново.")
         снять = act == "sr"
         имя = next((p["name"] for c_, p in find(pid) if p["id"] == pid), pid[:8])
         точка = stoplist.терминалы().get(tid, tid[:8])
@@ -1005,13 +1028,15 @@ def on_button(q):
             + ("<i>Позиция снова начнёт продаваться.</i>" if снять
                else "<i>Продажа прекратится сразу.</i>"),
             inline=[[{"text": "✅ Да", "callback_data":
-                      f"{'sy' if снять else 'sn'}:{pid}:{tid}"},
+                      f"{'sy' if снять else 'sn'}:{ссылка(pid, tid)}"},
                      {"text": "✖️ Отмена", "callback_data": "no:—"}]])
 
     if act in ("sy", "sn"):                           # подтверждено
         if not access.можно(chat, "цены"):
             return
-        pid, _, tid = arg.partition(":")
+        pid, tid = развернуть(arg)
+        if not pid:
+            return say(chat, "Кнопка устарела — открой стоп-лист заново.")
         try:
             if act == "sy":
                 stoplist.снять(pid, tid)
@@ -1511,7 +1536,8 @@ def cmd_stoplist(chat):
                       f"  <i>{п['точка']}</i>")
         if access.можно(chat, "цены"):
             кнопки.append([{"text": f"▶️ снять · {п['название'][:24]} · {п['точка']}",
-                            "callback_data": f"sr:{п['productId']}:{п['terminalGroupId']}"}])
+                            "callback_data":
+                                f"sr:{ссылка(п['productId'], п['terminalGroupId'])}"}])
     if len(позиции) > 20:
         строки.append(f"  <i>…и ещё {len(позиции) - 20}</i>")
     say(chat, "\n".join(строки), inline=кнопки or None)

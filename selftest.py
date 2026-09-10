@@ -42,7 +42,6 @@ def _необъявленные():
 
 def main():
     отправлено = []
-    bot.say = lambda chat, text, inline=None, keys=True: отправлено.append(text)
 
     # Кнопки меню должны совпадать с обработчиками — это же бот проверяет
     # при старте, но здесь ошибка видна списком, а не отказом запуститься.
@@ -55,6 +54,22 @@ def main():
     if пропало:
         print("❌ вызываются, но не объявлены: " + ", ".join(пропало))
         return 1
+
+    # Telegram отводит на callback_data 64 байта. Превышение не ломает
+    # кнопку по отдельности — оно роняет весь экран в «HTTP 400 Bad
+    # Request», и по этому тексту причину не угадать.
+    длинные = []
+    исходный_say = bot.say
+
+    def перехват(chat, text, inline=None, keys=True):
+        for ряд in (inline or []):
+            for к in ряд:
+                cd = к.get("callback_data", "")
+                if len(cd.encode()) > 64:
+                    длинные.append(cd)
+        отправлено.append(text)
+
+    bot.say = перехват
 
     ошибки, медленные = [], []
     for кнопка, экран in bot.BUTTONS.items():
@@ -79,6 +94,11 @@ def main():
         print("дольше 5 секунд:")
         for к, с in sorted(медленные, key=lambda x: -x[1]):
             print(f"   {к:<24} {с:.1f}с")
+    if длинные:
+        print(f"\n❌ callback_data длиннее 64 байт: {len(длинные)}")
+        for cd in длинные[:5]:
+            print(f"   {len(cd.encode())} байт: {cd[:70]}")
+        return 1
     if ошибки:
         print("\n❌ СЛОМАНЫ:")
         for к, e in ошибки:
