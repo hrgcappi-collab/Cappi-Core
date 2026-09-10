@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Общая библиотека Cappi: Syrve Server API, Cloud API, сайт, Glovo."""
-import hashlib, json, os, re, urllib.parse, urllib.request
+import hashlib, json, os, re, urllib.error, urllib.parse, urllib.request
 from html import unescape
 
 ENV = os.path.expanduser("~/.cappi/api.env")
@@ -40,8 +40,14 @@ def _post(url, body, headers=None, timeout=60):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **UA, **(headers or {})})
-    with _OPENER.open(req, timeout=timeout) as r:
-        return json.loads(r.read())
+    try:
+        with _OPENER.open(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # Syrve объясняет отказ в теле ответа. Без него остаётся голое
+        # «409 Conflict», по которому невозможно понять, что не так.
+        detail = e.read().decode("utf-8", "replace")[:300].strip()
+        raise RuntimeError(f"HTTP {e.code}: {detail or e.reason}") from None
 
 
 # Меню украинское, ищут часто по-русски: «Филадельфия» vs «Філадельфія».
@@ -115,8 +121,35 @@ class Syrve:
                                 dateFrom=date_from, dateTo=date_to))
         return d["response"]
 
+    def set_price(self, product_id, department_id, price, date):
+        """Меняет цену позиции на дату.
+
+        Syrve не даёт завести на одну дату два приказа по одному товару —
+        отвечает 409. Поэтому если приказ за этот день с этой позицией уже
+        есть, правим его, сохраняя остальные позиции нетронутыми.
+        """
+        for doc in self.orders(date, date):
+            if any(i["productId"] == product_id for i in doc["items"]):
+                items = []
+                for i in doc["items"]:
+                    i = dict(i)
+                    i.pop("num", None)          # при редактировании не учитывается
+                    if i["productId"] == product_id:
+                        i["price"] = price
+                    items.append(i)
+                return self._send({
+                    "id": doc["id"],
+                    "dateIncoming": doc["dateIncoming"],
+                    "documentNumber": doc["documentNumber"],
+                    "status": doc["status"],
+                    "deletePreviousMenu": doc.get("deletePreviousMenu", False),
+                    "dateTo": doc.get("dateTo", "2500-01-01"),
+                    "items": items,
+                })
+        return self.create_price_order(product_id, department_id, price, date)
+
     def create_price_order(self, product_id, department_id, price, date):
-        """Создаёт приказ об изменении прейскуранта. Реальное изменение цены."""
+        """Создаёт новый приказ об изменении прейскуранта."""
         body = {
             "dateIncoming": date,
             "status": "PROCESSED",
@@ -136,6 +169,9 @@ class Syrve:
                 "includeForCategories": [],
             }],
         }
+        return self._send(body)
+
+    def _send(self, body):
         url = f"{self.host}/resto/api/v2/documents/menuChange?key={self.key}"
         r = _post(url, body)
         if r.get("result") != "SUCCESS":

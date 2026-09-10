@@ -290,7 +290,7 @@ def prepare(chat, code, new_price, when, user):
 
 def do_change(c):
     with cappi.Syrve() as s:
-        doc = s.create_price_order(c["pid"], c["dep"], c["price"], c["date"])
+        doc = s.set_price(c["pid"], c["dep"], c["price"], c["date"])
     audit(f'{c["user"]}\t{c["code"]}\t{c["name"]}\t{c["old"]} -> {c["price"]}\t'
           f'с {c["date"]}\tприказ №{doc["documentNumber"]}')
     items = load_pending()
