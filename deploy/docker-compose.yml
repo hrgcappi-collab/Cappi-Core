@@ -1,0 +1,20 @@
+# Ставится рядом с CappiX, на тот же сервер. Отдельная сеть не нужна:
+# наружу торчит только вебхук, и его публикует Caddy.
+services:
+  cappi-core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: cappi-core
+    restart: unless-stopped
+    volumes:
+      # Конфиг и состояние живут на хосте: переживают пересборку образа.
+      - /opt/cappi-core/state:/root/.cappi
+    environment:
+      TZ: Europe/Kyiv        # учётный день и время отчёта считаются по Киеву
+    networks:
+      - cappix_default       # чтобы Caddy из CappiX мог достучаться
+
+networks:
+  cappix_default:
+    external: true
