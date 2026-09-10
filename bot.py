@@ -74,10 +74,10 @@ def save_pending(items):
 
 def find(query):
     """Ищем по артикулу или куску названия. Цена — из Cloud API, карточке не верим."""
-    q = query.strip().lower()
+    q = cappi.norm(query)
     return sorted(
         [(code, p) for code, p in cappi.cloud_prices().items()
-         if q == str(code).lower() or q in p["name"].lower()],
+         if q == str(code).lower() or q in cappi.norm(p["name"])],
         key=lambda x: x[1]["name"])
 
 
@@ -382,8 +382,11 @@ def on_message(m):
         if len(args) > 2 and args[2].lower() in ("завтра", "tomorrow"):
             when += timedelta(days=1)
         prepare(chat, args[0], price, when, who)
-    else:
+    elif text.startswith("/"):
         say(chat, "Не знаю такой команды. Жми кнопки снизу или /help")
+    else:
+        # Любой текст — это поиск. Так естественнее, чем отчитывать за команду.
+        cmd_price(chat, text)
 
 
 # ---------------------------------------------------------------- главный цикл
