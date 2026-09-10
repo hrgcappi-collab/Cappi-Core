@@ -591,6 +591,23 @@ def cmd_botstate(chat):
 
 
 # --------------------------------------------------------------- смена цены
+def дата_из_текста(строка):
+    """Дата из аргумента команды или None, если это не дата.
+
+    Раньше `date.fromisoformat` вызывался прямо на пользовательском вводе:
+    «/report абв» или «/report 2026-13-45» роняли обработчик, и человек
+    получал «Сломалось» вместо «это не дата».
+    """
+    строка = (строка or "").strip()
+    for формат in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%d.%m"):
+        try:
+            д = datetime.strptime(строка, формат).date()
+            return д.replace(year=date.today().year) if формат == "%d.%m" else д
+        except ValueError:
+            continue
+    return None
+
+
 def _default_date():
     """Завтра — чтобы цена сменилась ночью, а не в рабочий день."""
     return date.today() + timedelta(days=1) if DEFAULT_TOMORROW else date.today()
@@ -1288,6 +1305,20 @@ def watcher():
 
 
 # ------------------------------------------------------------------- кнопки
+def _номер(значение):
+    """Число из аргумента кнопки или None.
+
+    Кнопки живут в чате вечно: нажатую вчера жмут сегодня, старый экран
+    открывают после обновления бота. Аргумент в ней может быть каким
+    угодно, и падать на этом — значит писать «Сломалось» вместо «кнопка
+    устарела».
+    """
+    try:
+        return int(str(значение).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def on_button(q):
     chat = q["message"]["chat"]["id"]
     if not access.есть_доступ(q["from"]["id"]):
@@ -1300,7 +1331,12 @@ def on_button(q):
         if not access.можно(chat, "доступ"):
             return say(chat, "Только админ.")
         uid, _, роль = arg.partition(":")
-        access.добавить(uid, роль, кто=chat)
+        if роль not in access.РОЛИ:
+            return say(chat, "Кнопка устарела — пришли id заново.")
+        try:
+            access.добавить(uid, роль, кто=chat)
+        except ValueError as e:
+            return say(chat, f"Не выйдет: {e}")
         say(chat, f"✅ <code>{uid}</code> — <b>{роль}</b>\n"
                   f"<i>{access.ОПИСАНИЕ[роль]}</i>")
         try:
@@ -1312,7 +1348,10 @@ def on_button(q):
         return
 
     if act == "zc":                                   # выбрали зону → на сколько
-        зона = (jamshut.справочник_зон().get(int(arg)) or {}).get("name", arg)
+        зид = _номер(arg)
+        if зид is None:
+            return say(chat, "Кнопка устарела — открой список зон заново.")
+        зона = (jamshut.справочник_зон().get(зид) or {}).get("name", arg)
         return say(chat, f"На сколько закрыть <b>{зона}</b>?", inline=[
             [{"text": f"{м} мин", "callback_data": f"zd:{arg}:{м}"} for м in (15, 30, 45)],
             [{"text": f"{м} мин", "callback_data": f"zd:{arg}:{м}"} for м in (60, 90, 120)],
@@ -1320,7 +1359,9 @@ def on_button(q):
 
     if act == "zd":                                   # подтверждение закрытия
         зид, _, минут = arg.partition(":")
-        z = jamshut.справочник_зон().get(int(зид)) or {}
+        if _номер(зид) is None or _номер(минут) is None:
+            return say(chat, "Кнопка устарела — открой список зон заново.")
+        z = jamshut.справочник_зон().get(_номер(зид)) or {}
         return say(chat,
             f"🚧 Закрыть <b>{z.get('name', зид)}</b>\n"
             f"район: {z.get('district', '—')}\n"
@@ -1333,11 +1374,13 @@ def on_button(q):
         if not access.можно(chat, "зоны"):
             return say(chat, "Только оператор или админ.")
         зид, _, минут = arg.partition(":")
-        z = jamshut.справочник_зон().get(int(зид)) or {}
+        if _номер(зид) is None or (act == "zy" and _номер(минут) is None):
+            return say(chat, "Кнопка устарела — открой список зон заново.")
+        z = jamshut.справочник_зон().get(_номер(зид)) or {}
         имя = z.get("name", зид)
         try:
             if act == "zy":
-                jamshut.закрыть_зону([int(зид)], int(минут), who, z.get("district"))
+                jamshut.закрыть_зону([_номер(зид)], _номер(минут), who, z.get("district"))
                 say(chat, f"🚧 <b>{имя}</b> закрыта на {минут} мин.")
                 audit(f"{who}\tзона\tзакрыта\t{имя}\t{минут} мин")
             else:
@@ -1353,10 +1396,13 @@ def on_button(q):
     if act == "zk":                                   # подтверждённое открытие
         if not access.можно(chat, "зоны"):
             return
-        z = jamshut.справочник_зон().get(int(arg)) or {}
+        зид = _номер(arg)
+        if зид is None:
+            return say(chat, "Кнопка устарела — открой список зон заново.")
+        z = jamshut.справочник_зон().get(зид) or {}
         имя = z.get("name", arg)
         try:
-            jamshut.открыть_зону([int(arg)], who)
+            jamshut.открыть_зону([зид], who)
             say(chat, f"✅ <b>{имя}</b> открыта.")
             audit(f"{who}\tзона\tоткрыта\t{имя}")
         except Exception as e:
@@ -1413,7 +1459,7 @@ def on_button(q):
         return cmd_bug_карточка(chat, arg)
 
     if act == "bd":                                   # сбои за N дней
-        return cmd_bugs(chat, дней=int(arg))
+        return cmd_bugs(chat, дней=_номер(arg) or 14)
 
     if act == "bf":                                   # сбои по типу
         return cmd_bugs(chat, тип=arg)
@@ -1422,6 +1468,8 @@ def on_button(q):
         if not access.можно(chat, "админка"):
             return say(chat, "Только админ.")
         ид, _, статус = arg.partition(":")
+        if статус not in bugs.СТАТУСЫ:
+            return say(chat, "Кнопка устарела — открой журнал заново.")
         bugs.пометить(ид, статус, кто=chat)
         say(chat, f"Помечено: <b>{статус}</b>." +
                   ("\n<i>Если повторится — снова появится в списке.</i>"
@@ -1442,17 +1490,22 @@ def on_button(q):
         return cmd_kpi_показать(chat, роль, месяц)
 
     if act == "sd":                                   # смена за выбранный день
-        return cmd_shift(chat, date.fromisoformat(arg))
+        d = дата_из_текста(arg)
+        if d is None:
+            return say(chat, "Кнопка устарела — выбери день заново.")
+        return cmd_shift(chat, d)
 
     if act == "sp":
-        return cmd_pick_shift_day(chat, int(arg))
+        return cmd_pick_shift_day(chat, _номер(arg) or 0)
 
     if act == "rd":                                   # отчёт за выбранный день
-        d = date.fromisoformat(arg)
+        d = дата_из_текста(arg)
+        if d is None:
+            return say(chat, "Кнопка устарела — выбери день заново.")
         return cmd_report(chat, d, live=(d == date.today()))
 
     if act == "rp":                                   # листаем календарь назад
-        return cmd_pick_day(chat, int(arg))
+        return cmd_pick_day(chat, _номер(arg) or 0)
 
     if act == "ac":                                   # карточка человека
         return экран_человека(chat, arg)
@@ -2150,7 +2203,9 @@ def cmd_процент(chat, месяц=None):
             кнопки.append(ряд)
         return say(chat, "Процент кухни за какой месяц?", inline=кнопки)
 
-    day = date.fromisoformat(месяц + "-15")
+    day = дата_из_текста(f"{месяц}-15")
+    if day is None:
+        return say(chat, "Кнопка устарела — выбери месяц заново.")
     say(chat, "Считаю…")
     with cappi.Syrve() as s:
         r = kpi.процент_кухни(s, day)
@@ -2250,7 +2305,9 @@ def cmd_kpi_показать(chat, роль, месяц):
     Показываем KPI одной роли, а не всех сразу: у шефа и су-шефа разные
     критерии и разные нормы, а общий экран заставляет искать в нём своё.
     """
-    day = date.fromisoformat(месяц + "-15")
+    day = дата_из_текста(f"{месяц}-15")
+    if day is None:
+        return say(chat, "Кнопка устарела — выбери месяц заново.")
     say(chat, "Считаю…")
     with cappi.Syrve() as s:
         r = kpi.посчитать(s, day)
@@ -2489,9 +2546,14 @@ def мин(x):
     return f"{x:.1f}".rstrip("0").rstrip(".")
 
 
-def _знак(факт, цель_):
+def _против_цели(факт, цель_):
     """Цель — не украшение, поэтому пишем не только «сколько», но и «на
-    сколько мимо». Иначе цифру читают, а вывод не делают."""
+    сколько мимо». Иначе цифру читают, а вывод не делают.
+
+    Имя не _знак: так уже называется функция KPI выше, и второе
+    определение молча перекрывало первое — экраны KPI падали, как только
+    в тайниках появлялись данные.
+    """
     if цель_ is None:
         return ""
     разница = факт - цель_
@@ -2509,9 +2571,9 @@ def _блок_времени(точки, заголовок):
         строки.append(f"<b>{точка}</b>  <i>{склонение(v['заказов'], 'заказ', 'заказа', 'заказов')}</i>")
         for ключ, имя, что in ПОДПИСИ_ВРЕМЕНИ:
             строки.append(f"{имя}: <b>{мин(v[ключ])} мин</b>"
-                          f"{_знак(v[ключ], report.цель(ключ, точка))}")
+                          f"{_против_цели(v[ключ], report.цель(ключ, точка))}")
         строки.append(f"Доставка без КЦ: <b>{мин(v['доставка'])} мин</b>"
-                      f"{_знак(v['доставка'], цель_доставки or None)}")
+                      f"{_против_цели(v['доставка'], цель_доставки or None)}")
     if not точки:
         строки.append("\nНет данных за этот период.")
     return "\n".join(строки)
@@ -2737,7 +2799,12 @@ def on_message(m):
                 return say(chat, f"Это не похоже на цену: <b>{text}</b>. Напиши числом.")
             return prepare(chat, st["code"], price, _default_date(), who)
 
-    cmd, *args = text.split()
+    части = text.split()
+    if not части:
+        # Пустое сообщение или одни пробелы — Telegram такое присылает,
+        # например когда пересылают картинку с пробелом в подписи.
+        return
+    cmd, *args = части
     cmd = cmd.lower().split("@")[0]
     if cmd in ("/start", "/help"):
         _menu[chat] = "главное"
@@ -2749,7 +2816,11 @@ def on_message(m):
     elif cmd == "/pending":
         cmd_pending(chat)
     elif cmd in ("/report", "/итоги"):
-        d = date.fromisoformat(args[0]) if args else None
+        d = дата_из_текста(args[0]) if args else None
+        if args and d is None:
+            return say(chat, f"Не понял дату: <b>{args[0]}</b>\n"
+                             f"<i>Например: <code>/report 2026-09-10</code> "
+                             f"или <code>/report 10.09</code></i>")
         cmd_report(chat, d, live=not args)
     elif cmd == "/people":
         if not access.можно(chat, "админка"):
@@ -2794,9 +2865,12 @@ def on_message(m):
             a = args[2].lower()
             if a in СЕГОДНЯ_СЛОВА:
                 when = date.today()
-            elif re.fullmatch(r"\d{1,2}\.\d{1,2}", a):     # 12.09
-                d, m = (int(x) for x in a.split("."))
-                when = date(date.today().year, m, d)
+            else:
+                разобрана = дата_из_текста(a)
+                if разобрана is None:
+                    return say(chat, f"Не понял дату: <b>{a}</b>\n"
+                                     f"<i>Пиши «сегодня» или «12.09».</i>")
+                when = разобрана
         prepare(chat, args[0], price, when, who)
     elif text.startswith("/"):
         say(chat, "Не знаю такой команды. Жми кнопки снизу или /help")
