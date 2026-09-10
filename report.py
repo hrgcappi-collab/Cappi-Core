@@ -204,12 +204,28 @@ def месячный_план(day):
     return накоплено, sum(float(v) for v in недели.values())
 
 
+# Удалённые блюда и заказы из подсчётов исключаются — так же, как в сводной
+# таблице Syrve, по которой сверяются. Без этого фильтра за 09.09 выходило
+# 458 блюд вместо 406: в счёт попадало всё, что успели пробить и удалить.
+# На выручку не влияет — у удалённого она и так ноль.
+НЕ_УДАЛЁННЫЕ = {
+    "DeletedWithWriteoff": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
+    "OrderDeleted": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
+}
+
+# Заказом считается чек с едой или товаром. Служебные строки — доставка,
+# «Замовлення з додатку» — образуют свои чеки, и без этого фильтра их
+# набегало 208 против 111 в Syrve.
+ЕДА = {"DishType": {"filterType": "IncludeValues", "values": ["DISH", "GOODS"]}}
+
+
 # ------------------------------------------------------------------- OLAP
-def _olap(s, day, group, aggregate, extra_filters=None):
+def _olap(s, day, group, aggregate, extra_filters=None, колонки=None):
     body = {
         "reportType": "SALES",
         "buildSummary": False,
         "groupByRowFields": group,
+        "groupByColFields": колонки or [],
         "aggregateFields": aggregate,
         "filters": {
             # Конец периода — следующий день: Syrve не принимает from == to.
@@ -230,14 +246,15 @@ def orders_count(s, day):
     попадёт в оба типа и посчитается дважды — за 09.09 так получалось 330
     вместо 208. Спрашиваем без разбивки, тогда Syrve считает уникальные.
     """
-    rows = _olap(s, day, [], ["UniqOrderId"])
+    rows = _olap(s, day, [], ["UniqOrderId"], {**НЕ_УДАЛЁННЫЕ, **ЕДА})
     return sum(r.get("UniqOrderId", 0) or 0 for r in rows)
 
 
 def sales(s, day):
     """Выручка, чеки и количество — в разрезе типа товара."""
     rows = _olap(s, day, ["DishType"],
-                 ["DishDiscountSumInt", "UniqOrderId", "DishAmountInt"])
+                 ["DishDiscountSumInt", "UniqOrderId", "DishAmountInt"],
+                 НЕ_УДАЛЁННЫЕ)
     by = {r.get("DishType"): r for r in rows}
 
     def взять(*типы):
@@ -256,6 +273,31 @@ def sales(s, day):
         "блюда_и_товары": взять("DISH", "GOODS"),
         "по_типам": {t: взять(t) for t in by},
     }
+
+
+def by_category(s, day):
+    """Заказы и блюда по категориям, отдельно Блюдо и Товар, по точкам.
+
+    Разрез такой же, как в сводной таблице Syrve, к которой все привыкли:
+    строки — тип товара и категория, колонки — концепции.
+
+    Важно про «Заказов». Сложить его по категориям нельзя: заказ с роллами
+    и пиццей попадёт в обе строки. Поэтому итог берём отдельным запросом
+    без разбивки, а по строкам он честен только внутри своей строки.
+    """
+    rows = _olap(s, day, ["DishType", "DishCategory"],
+                 ["UniqOrderId", "DishAmountInt"],
+                 {**НЕ_УДАЛЁННЫЕ, **ЕДА}, колонки=["Conception"])
+    out = {}
+    for r in rows:
+        тип = r.get("DishType") or "—"
+        кат = r.get("DishCategory") or "без категории"
+        точка = (r.get("Conception") or "—").lstrip("012 ").strip()
+        цель = out.setdefault(тип, {}).setdefault(кат, {})
+        т = цель.setdefault(точка, {"заказов": 0, "блюд": 0})
+        т["заказов"] += r.get("UniqOrderId", 0) or 0
+        т["блюд"] += r.get("DishAmountInt", 0) or 0
+    return out
 
 
 def sales_by_point(s, day):
@@ -545,14 +587,13 @@ def render(d, live=False):
                    f"    {money(факт)} ₴ / {money(план_нак)} ₴  <b>{pr:.0f}%</b>",
                    f"    месяц целиком: {money(d['месяц_всего'])} ₴"]
 
-    с_блюдами = p["блюда"]["чеки"]
-    всего_чеков = d.get("чеков") or с_блюдами
+    товары = p["по_типам"].get("GOODS") or {"чеки": 0, "штук": 0}
     строки += ["",
-               f"📦 Заказов: <b>{всего_чеков}</b>"
-               + (f"  <i>из них с блюдами {с_блюдами}</i>"
-                  if всего_чеков != с_блюдами else ""),
-               f"🍱 Блюд: <b>{p['блюда_и_товары']['штук']:,.0f}</b>"
-               .replace(",", " ") + "  <i>(Блюдо + Товар)</i>"]
+               f"📦 Заказов: <b>{d.get('чеков') or p['блюда']['чеки']}</b>",
+               f"🍱 Блюд: <b>{p['блюда_и_товары']['штук']:,.0f}</b>".replace(",", " "),
+               f"    блюда {p['блюда']['чеки']} зак · "
+               f"{p['блюда']['штук']:.0f} шт   ·   "
+               f"товары {товары['чеки']} зак · {товары['штук']:.0f} шт"]
 
     if d["отмены"]:
         всего = sum(d["отмены"].values())
