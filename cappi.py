@@ -23,8 +23,21 @@ def cfg():
 
 
 class _R308(urllib.request.HTTPRedirectHandler):
+    """308 сохраняет метод и тело — в отличие от 301.
+
+    Обработчик 301 у POST меняет метод на GET и выбрасывает тело. Для
+    приказа о цене это значило бы, что запись молча превращается в чтение:
+    бот отчитается об успехе, а цена в кассу не уйдёт.
+    """
+
     def http_error_308(self, req, fp, code, msg, headers):
-        return self.http_error_301(req, fp, 301, msg, headers)
+        новый = headers.get("Location")
+        if not новый:
+            return None
+        req = urllib.request.Request(
+            urllib.parse.urljoin(req.full_url, новый), data=req.data,
+            headers=dict(req.header_items()), method=req.get_method())
+        return self.parent.open(req, timeout=req.timeout)
 
 
 _OPENER = urllib.request.build_opener(_R308)
@@ -42,7 +55,16 @@ def _post(url, body, headers=None, timeout=60):
         headers={"Content-Type": "application/json", **UA, **(headers or {})})
     try:
         with _OPENER.open(req, timeout=timeout) as r:
-            return json.loads(r.read())
+            тело = r.read()
+        if not тело.strip():
+            return {}
+        try:
+            return json.loads(тело)
+        except ValueError:
+            # Шлюз вернул HTML или мусор с кодом 2xx. Внятная ошибка лучше
+            # JSONDecodeError, по которому не понять, что произошло.
+            raise RuntimeError(
+                f"ответ не JSON: {тело[:150].decode('utf-8', 'replace')}") from None
     except urllib.error.HTTPError as e:
         # Syrve объясняет отказ в теле ответа. Без него остаётся голое
         # «409 Conflict», по которому невозможно понять, что не так.
@@ -57,7 +79,7 @@ _ALPHA = str.maketrans({
     "і": "и", "ї": "и", "ы": "и",
     "є": "е", "э": "е", "ё": "е",
     "ґ": "г",
-    "'": "", "'": "", "`": "", "ʼ": "", "ъ": "",
+    "'": "", "\u2019": "", "\u02bc": "", "\u2018": "", "`": "", "ъ": "",
 })
 
 
@@ -78,8 +100,9 @@ def norm_full(s):
 class PriceOrderExists(RuntimeError):
     """На эту дату по этой позиции приказ уже есть — второй Syrve не примет."""
 
-    def __init__(self, number, date):
+    def __init__(self, number, date, позиции=None):
         self.number, self.date = number, date
+        self.позиции = позиции or []   # для пачки: какие именно строки заняты
         super().__init__(f"на {date} по этой позиции уже есть приказ №{number}")
 
 
@@ -147,26 +170,55 @@ class Syrve:
                 raise PriceOrderExists(doc["documentNumber"], date)
         return self.create_price_order(product_id, department_id, price, date)
 
-    def create_price_order(self, product_id, department_id, price, date):
-        """Создаёт новый приказ об изменении прейскуранта."""
+    def set_prices(self, строки, date):
+        """Меняет цены пачкой — одним приказом на все позиции.
+
+        Тридцать отдельных приказов и один приказ на тридцать строк для
+        Syrve не одно и то же: выгрузка идёт по документам, и тридцать
+        документов растянут доставку на витрины, а часть попадёт в разные
+        двадцатиминутные окна. Прейскурант должен меняться целиком.
+
+        Проверка занятых позиций одна на всю пачку и до отправки: половина
+        применённого списка — худший исход из возможных.
+        """
+        занято = {}
+        for doc in self.orders(date, date):
+            for i in doc["items"]:
+                занято.setdefault(i["productId"], doc["documentNumber"])
+        конфликт = [(r, занято[r["pid"]]) for r in строки if r["pid"] in занято]
+        if конфликт:
+            raise PriceOrderExists(конфликт[0][1], date, конфликт)
+        return self.create_price_order(строки, date)
+
+    def create_price_order(self, product_id, department_id=None, price=None,
+                           date=None):
+        """Создаёт новый приказ об изменении прейскуранта.
+
+        Первым аргументом либо одна позиция (product_id, department_id,
+        price), либо готовый список строк — тогда всё едет одним документом.
+        """
+        if isinstance(product_id, (list, tuple)):
+            строки, date = product_id, department_id
+        else:
+            строки = [{"pid": product_id, "dep": department_id, "price": price}]
         body = {
             "dateIncoming": date,
             "status": "PROCESSED",
             "deletePreviousMenu": False,
             "dateTo": "2500-01-01",
             "items": [{
-                "departmentId": department_id,
-                "productId": product_id,
+                "departmentId": r["dep"],
+                "productId": r["pid"],
                 "productSizeId": None,
                 "including": True,
-                "price": price,
+                "price": r["price"],
                 "taxCategoryId": None,
                 "taxCategoryEnabled": False,
                 "dishOfDay": False,
                 "flyerProgram": False,
                 "pricesForCategories": [],
                 "includeForCategories": [],
-            }],
+            } for r in строки],
         }
         return self._send(body)
 

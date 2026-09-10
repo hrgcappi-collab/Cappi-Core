@@ -4,11 +4,12 @@
 Запуск:  python3 bot.py
 Конфиг:  ~/.cappi/api.env  (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS)
 """
-import json, os, re, sys, threading, time, traceback, urllib.parse, urllib.request
+import html, json, os, re, sys, threading, time, traceback, urllib.parse, urllib.request
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
 import access
+import bugs
 import cappi
 import jamshut
 import kpi
@@ -68,8 +69,8 @@ _lock = threading.Lock()
                 ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
                    ["📅 Выбрать день"],
-                   ["🎯 План", "🚧 Зоны"],
-                   ["😠 Жалобы"],
+                   ["🎯 План", "⏱ Время работы"],
+                   ["🚧 Зоны", "😠 Жалобы"],
                    ["◀️ Назад"]],
     # Персонал — про людей на смене. Отдельно от показателей: там про
     # деньги, здесь про тех, кто их зарабатывает, и вопросы разные.
@@ -85,6 +86,7 @@ _lock = threading.Lock()
                 ["🩺 Здоровье"],
                 ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
+                ["🐞 Сбои"],
                 ["🗣 Непонятые", "🔐 Отказы"],
                 ["👥 Доступ"],
                 ["🤖 Состояние бота"],
@@ -163,8 +165,11 @@ def load_pending():
         return []
 
 
+_очередь = threading.Lock()      # pending.json пишут и watcher, и обработчик
+
+
 def save_pending(items):
-    json.dump(items, open(PENDING, "w"), ensure_ascii=False, indent=1)
+    _записать_json(PENDING, items)
 
 
 # Меню украинское, ищут вперемешку. Часть слов не сводится заменой букв:
@@ -623,19 +628,200 @@ def do_change(c):
         doc = s.set_price(c["pid"], c["dep"], c["price"], c["date"])
     audit(f'{c["user"]}\t{c["code"]}\t{c["name"]}\t{c["old"]} -> {c["price"]}\t'
           f'с {c["date"]}\tприказ №{doc["documentNumber"]}')
-    items = load_pending()
     сегодня = c["date"] == date.today().isoformat()
     # Приказ на завтра проверять по витринам сегодня бессмысленно — цена ещё
     # не должна была измениться. Сначала убеждаемся, что Syrve его принял и
     # показывает как запланированный, а витрины смотрим уже в тот день.
-    items.append({**{k: c[k] for k in ("code", "name", "price", "old", "chat", "date")},
-                  "guid": c["pid"],
-                  "doc": doc["documentNumber"],
-                  "stage": "showcase" if сегодня else "planned",
-                  "due": (datetime.now() + timedelta(
-                      minutes=CHECK_AFTER_MIN if сегодня else 5)).isoformat()})
-    save_pending(items)
+    with _очередь:
+        items = load_pending()
+        items.append({**{k: c[k] for k in ("code", "name", "price", "old",
+                                           "chat", "date")},
+                      "guid": c["pid"],
+                      "doc": doc["documentNumber"],
+                      "stage": "showcase" if сегодня else "planned",
+                      "due": (datetime.now() + timedelta(
+                          minutes=CHECK_AFTER_MIN if сегодня else 5)).isoformat()})
+        save_pending(items)
     return doc
+
+
+
+# ------------------------------------------------------------- цены списком
+# Прейскурант присылают так, как он лежит в таблице: строка = позиция, в
+# конце цена. Отвечать на такое «Не понял» — заставлять человека делать
+# тридцать раз /set вручную, ради чего бот и не нужен.
+СТРОКА_ЦЕНЫ = re.compile(
+    r"^\s*(?P<имя>.*?[^\d\s.,])[\s.]+(?P<цена>\d+(?:[.,]\d{1,2})?)\s*(?:грн|₴|uah)?\s*$",
+    re.I)
+
+
+def разобрать_список(текст):
+    """Строки «название … цена». Цена — последнее число: в названиях свои
+    числа («20 гр», «2 шт», «0,33 л»), и брать первое нельзя."""
+    строки, мусор = [], []
+    for сырое in текст.splitlines():
+        s = сырое.strip().strip("•*-–—|\t ")
+        if not s or s.lower().startswith(("итого", "всего", "цена", "назва")):
+            continue
+        m = СТРОКА_ЦЕНЫ.match(s)
+        if not m:
+            мусор.append(s)
+            continue
+        имя = m.group("имя").strip(" .,–—-")
+        цена = float(m.group("цена").replace(",", "."))
+        if len(имя) < 3 or not 0 < цена < 100000:
+            мусор.append(s)
+            continue
+        строки.append({"имя": имя, "цена": цена})
+    return строки, мусор
+
+
+def похоже_на_список(текст):
+    """Список — это когда так выглядит большинство строк, а не одна.
+
+    Порог в три строки нарочный: «Пепероні 96» — это поиск позиции, а не
+    прейскурант, и уводить одиночный запрос в массовую смену цен нельзя.
+    """
+    строки, мусор = разобрать_список(текст)
+    return len(строки) >= 3 and len(строки) >= len(мусор)
+
+
+def cmd_price_list(chat, текст, who):
+    if not access.можно(chat, "цены"):
+        return say(chat, "Менять цены может оператор или админ. "
+                         "У тебя роль «смотрящий» — показать могу, менять нет.")
+    строки, мусор = разобрать_список(текст)
+    say(chat, f"Разбираю {len(строки)} строк — смотрю текущие цены…")
+
+    когда = _default_date()
+    нашёл, спорные, нет_позиции, без_цены, скачки, совпали = [], [], [], [], [], []
+    with cappi.Syrve() as s:
+        товары = [p for p in s.products() if not p.get("deleted")]
+        индекс = {}
+        for p in товары:
+            индекс.setdefault(cappi.norm_full(p["name"]), []).append(p)
+        for r in строки:
+            варианты = индекс.get(cappi.norm_full(r["имя"]), [])
+            if not варианты:
+                нет_позиции.append(r)
+                continue
+            if len(варианты) > 1:
+                # Два товара с одним названием — какой из них имели в виду,
+                # знает только человек. Молча выбрать первый значит с шансом
+                # 50% поменять цену не тому.
+                спорные.append({**r, "сколько": len(варианты)})
+                continue
+            p = варианты[0]
+            цена, отдел = s.price_of(p["id"], когда.isoformat())
+            строка = {**r, "pid": p["id"], "dep": отдел, "было": цена,
+                      "название": p["name"], "код": p.get("num"),
+                      "price": r["цена"]}
+            if отдел is None:
+                без_цены.append(строка)
+            elif цена is not None and abs(цена - r["цена"]) < 0.005:
+                совпали.append(строка)
+            elif (цена and abs(r["цена"] - цена) / max(цена, 1) * 100
+                  > MAX_CHANGE_PCT):
+                скачки.append(строка)
+            else:
+                нашёл.append(строка)
+
+    if not нашёл and not скачки:
+        return say(chat, "Менять нечего: " + ", ".join(filter(None, [
+            f"{len(совпали)} уже с такой ценой" if совпали else "",
+            f"{len(нет_позиции)} не нашёл" if нет_позиции else "",
+            f"{len(спорные)} с одинаковыми названиями" if спорные else "",
+            f"{len(без_цены)} без действующей цены" if без_цены else ""])) + ".")
+
+    tok = f"L{int(time.time())}{chat % 1000}"
+    with _lock:
+        _confirm[tok] = {"строки": нашёл, "скачки": скачки,
+                         "date": когда.isoformat(), "chat": chat, "user": who}
+
+    текст_ = [f"<b>Прейскурант: {len(нашёл)} позиций</b>", ""]
+    for r in нашёл[:20]:
+        текст_.append(f"• {r['название']} — <b>{fmt(r['было'])} → "
+                      f"{fmt(r['цена'])} ₴</b>")
+    if len(нашёл) > 20:
+        текст_.append(f"<i>…и ещё {len(нашёл) - 20}</i>")
+
+    def хвост(заголовок, список, как=lambda r: r["имя"]):
+        if список:
+            текст_.append("")
+            текст_.append(f"<i>{заголовок}:</i> " +
+                          ", ".join(как(r) for r in список[:8]) +
+                          (f" <i>и ещё {len(список) - 8}</i>"
+                           if len(список) > 8 else ""))
+
+    хвост("Уже с такой ценой", совпали)
+    хвост("Не нашёл в номенклатуре", нет_позиции)
+    хвост("Несколько товаров с таким названием", спорные)
+    хвост("Нет действующей цены", без_цены)
+    if скачки:
+        текст_ += ["", f"⚠️ <b>Не беру — скачок больше {MAX_CHANGE_PCT}%:</b>"]
+        текст_ += [f"• {r['название']}: {fmt(r['было'])} → {fmt(r['цена'])} ₴"
+                   for r in скачки[:8]]
+        текст_.append("<i>Похоже на опечатку. Если цена верная — "
+                      "жми «взять и скачки», внизу.</i>")
+
+    сегодня = когда == date.today()
+    текст_ += ["", ("Проведу <b>сейчас</b>, посреди дня — задену открытые смены."
+                    if сегодня else
+                    f"Проведу ночью на {когда:%d.%m}, около 3:00.")]
+    другая = date.today() + timedelta(days=1) if сегодня else date.today()
+    кнопки = [[{"text": f"✅ Провести {len(нашёл)}", "callback_data": f"gl:{tok}"},
+               {"text": "✖️ Отмена", "callback_data": f"no:{tok}"}]]
+    if скачки:
+        кнопки.append([{"text": f"⚠️ Взять и скачки ({len(скачки)})",
+                        "callback_data": f"gj:{tok}"}])
+    if нашёл:
+        кнопки.append([{"text": ("⚡️ Поменять сейчас" if not сегодня
+                                 else f"🌙 Лучше ночью, на {другая:%d.%m}"),
+                        "callback_data": f"ld:{tok}"}])
+    say(chat, "\n".join(текст_), inline=кнопки)
+
+
+def провести_список(chat, c, who):
+    строки, когда = c["строки"], c["date"]
+    if not строки:
+        return say(chat, "Список пуст.")
+    try:
+        with cappi.Syrve() as s:
+            doc = s.set_prices(строки, когда)
+    except cappi.PriceOrderExists as e:
+        имена = ", ".join(r["название"] for r, _ in e.позиции[:5]) or "позиции"
+        return say(chat,
+                   f"⚠️ Не провёл <b>ничего</b>: на "
+                   f"{date.fromisoformat(e.date):%d.%m} уже есть приказ "
+                   f"<b>№{e.number}</b> — там {имена}"
+                   f"{' и другие' if len(e.позиции) > 5 else ''}.\n\n"
+                   f"Второй приказ на ту же дату Syrve не примет, а провести "
+                   f"половину списка хуже, чем не проводить: часть цен уедет "
+                   f"на витрины, часть нет.\n\n"
+                   f"Поставь список на другую дату или закрой тот приказ.")
+    except Exception as e:
+        return say(chat, f"❌ Не получилось: {e}")
+
+    for r in строки:
+        audit(f'{who}\t{r.get("код")}\t{r["название"]}\t{r["было"]} -> '
+              f'{r["цена"]}\tс {когда}\tприказ №{doc["documentNumber"]} (списком)')
+    сегодня = когда == date.today().isoformat()
+    with _очередь:
+        items = load_pending()
+        for r in строки:
+            items.append({"code": r.get("код"), "name": r["название"],
+                          "price": r["цена"], "old": r["было"], "chat": chat,
+                          "date": когда, "guid": r["pid"],
+                          "doc": doc["documentNumber"],
+                          "stage": "showcase" if сегодня else "planned",
+                          "due": (datetime.now() + timedelta(
+                              minutes=CHECK_AFTER_MIN if сегодня else 5)
+                                  ).isoformat()})
+        save_pending(items)
+    say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён — "
+              f"<b>{len(строки)} позиций</b> с "
+              f"{date.fromisoformat(когда):%d.%m}.\n\n"
+              f"Витрины проверю сам и напишу, если где-то не совпадёт.")
 
 
 # ------------------------------------------------------- фоновая проверка
@@ -683,18 +869,38 @@ def _check_showcase(it):
     return None
 
 
+def _день_отправлен(день):
+    """Пережил ли рестарт факт отправки. В памяти он терялся, и контейнер,
+    перезапущенный после 22:00, слал итоги дня второй раз."""
+    return _виденное("отчёт") == {день.isoformat()}
+
+
+def _пометить_день(день):
+    _запомнить("отчёт", [день.isoformat()])
+
+
 def _send_daily(sent):
     """Итоги дня в REPORT_AT. sent помнит дату, чтобы не отправить дважды."""
     now = datetime.now()
-    if now.strftime("%H:%M") < REPORT_AT or sent.get("day") == now.date():
+    if now.strftime("%H:%M") < REPORT_AT or _день_отправлен(now.date()):
         return
-    sent["day"] = now.date()
-    текст = report.render(report.collect(), live=False)
+    # Строим ДО отметки: сбой Syrve в 22:00 иначе молча убивал сводку дня —
+    # день помечен отправленным, а ничего не ушло.
+    try:
+        текст = report.render(report.collect(), live=False)
+    except Exception:
+        traceback.print_exc()
+        return
+    дошло = False
     for uid in access.подписчики_отчёта():
         try:
             say(uid, текст)
+            дошло = True
         except Exception:
             traceback.print_exc()
+    if дошло:
+        _пометить_день(now.date())
+        sent["day"] = now.date()
 
 
 def _зона_изменилась(e):
@@ -791,6 +997,21 @@ def _виденное(раздел):
         return set()
 
 
+def _записать_json(путь, данные):
+    """Пишем через временный файл и переименование.
+
+    Обычный open('w') при обрыве (деплой, OOM) оставляет обрезанный файл;
+    читатели глотают ошибку и считают состояние пустым — а это значит
+    повторную рассылку всех сегодняшних алертов и потерю очереди проверок.
+    """
+    врем = путь + ".tmp"
+    with open(врем, "w") as f:
+        json.dump(данные, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(врем, путь)
+
+
 def _запомнить(раздел, ключи):
     try:
         d = json.load(open(ALERTS))
@@ -799,7 +1020,7 @@ def _запомнить(раздел, ключи):
     # Держим только сегодняшнее: вчерашние ключи ни с чем не сравниваются,
     # а файл иначе растёт без конца.
     d[раздел] = sorted(ключи)
-    json.dump(d, open(ALERTS, "w"), ensure_ascii=False)
+    _записать_json(ALERTS, d)
 
 
 МАРКЕТОЛОГ = 770891676     # кому адресован запрос по тайному гостю
@@ -1010,24 +1231,35 @@ def watcher():
     последний_стоп = [0.0]
     последний_потери = [0.0]
     последний_тайник = [0.0]
+    последний_правки = [0.0]      # свой таймер: общий с тайниками не срабатывал
     while True:
         try:
             _send_daily(sent)
             _просить_тайники(последний_тайник)
-            _просить_корректировки(последний_тайник)
+            _просить_корректировки(последний_правки)
             _pull_zones(последний_опрос)
             _watch_stoplist(последний_стоп)
             _watch_losses(последний_потери)
-            keep = []
-            for it in load_pending():
-                if datetime.now() < datetime.fromisoformat(it["due"]):
-                    keep.append(it)
-                    continue
-                nxt = (_check_planned(it) if it.get("stage") == "planned"
-                       else _check_showcase(it))
-                if nxt:
-                    keep.append(nxt)
-            save_pending(keep)
+            with _очередь:
+                keep = []
+                for it in load_pending():
+                    if datetime.now() < datetime.fromisoformat(it["due"]):
+                        keep.append(it)
+                        continue
+                    try:
+                        nxt = (_check_planned(it) if it.get("stage") == "planned"
+                               else _check_showcase(it))
+                    except Exception as e:
+                        # Сбой по одному элементу не должен ронять цикл: иначе
+                        # уже обработанные шлются повторно, а вечно падающий
+                        # элемент блокирует очередь навсегда.
+                        traceback.print_exc()
+                        bugs.сбой(f"проверка {it.get('code')}", e)
+                        nxt = {**it, "due": (datetime.now()
+                                             + timedelta(minutes=15)).isoformat()}
+                    if nxt:
+                        keep.append(nxt)
+                save_pending(keep)
         except Exception:
             traceback.print_exc()
         time.sleep(60)
@@ -1155,6 +1387,28 @@ def on_button(q):
             say(chat, "Такого в списке уже нет.")
         return
 
+    if act == "bg":                                   # карточка сбоя
+        return cmd_bug_карточка(chat, arg)
+
+    if act == "bd":                                   # сбои за N дней
+        return cmd_bugs(chat, дней=int(arg))
+
+    if act == "bf":                                   # сбои по типу
+        return cmd_bugs(chat, тип=arg)
+
+    if act == "bs":                                   # пометить сбой
+        if not access.можно(chat, "админка"):
+            return say(chat, "Только админ.")
+        ид, _, статус = arg.partition(":")
+        bugs.пометить(ид, статус, кто=chat)
+        say(chat, f"Помечено: <b>{статус}</b>." +
+                  ("\n<i>Если повторится — снова появится в списке.</i>"
+                   if статус in ("починен", "не баг") else ""))
+        return cmd_bugs(chat)
+
+    if act == "вр":                                   # время работы: период
+        return cmd_время(chat, arg)
+
     if act == "pc":                                   # процент кухни за месяц
         return cmd_процент(chat, arg)
 
@@ -1239,9 +1493,52 @@ def on_button(q):
         new = date.today() + timedelta(days=1) if cur == date.today() else date.today()
         return prepare(chat, c["code"], c["price"], new, who)
 
+    if act == "gl":                                   # провести список
+        return провести_список(chat, c, who)
+
+    if act == "gj":                                   # список: взять и скачки
+        # Порог в 50% защищает от опечатки, а не запрещает крупные правки.
+        # Показываем ровно то, что добавляем, и просим подтвердить второй раз.
+        добавились = c.get("скачки", [])
+        if not добавились:
+            return say(chat, "Крупных правок в этом списке нет.")
+        c["строки"] = c["строки"] + добавились
+        c["скачки"] = []
+        with _lock:
+            _confirm[arg] = c
+        добавка = "\n".join(
+            f"• {r['название']}: <b>{fmt(r['было'])} → {fmt(r['цена'])} ₴</b> "
+            f"(+{(r['цена'] - r['было']) / max(r['было'], 1) * 100:.0f}%)"
+            for r in добавились[:8])
+        return say(chat, f"Добавляю крупные правки:\n{добавка}\n\n"
+                         f"Итого <b>{len(c['строки'])} позиций</b>. Проводим?",
+                   inline=[[{"text": f"✅ Провести {len(c['строки'])}",
+                             "callback_data": f"gl:{arg}"},
+                            {"text": "✖️ Отмена", "callback_data": f"no:{arg}"}]])
+
+    if act == "ld":                                   # список: другая дата
+        cur = date.fromisoformat(c["date"])
+        нов = date.today() + timedelta(days=1) if cur == date.today() else date.today()
+        with cappi.Syrve() as s:
+            for r in c["строки"]:
+                r["было"], r["dep"] = s.price_of(r["pid"], нов.isoformat())
+        c["строки"] = [r for r in c["строки"] if r["dep"]]
+        c["date"] = нов.isoformat()
+        with _lock:
+            _confirm[arg] = c
+        return say(chat, f"Ок, тогда на <b>{нов:%d.%m}</b> — "
+                         f"{len(c['строки'])} позиций.",
+                   inline=[[{"text": f"✅ Провести {len(c['строки'])}",
+                             "callback_data": f"gl:{arg}"},
+                            {"text": "✖️ Отмена", "callback_data": f"no:{arg}"}]])
+
     if act == "go":
         try:
             doc = do_change(c)
+            say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён\n"
+                      f"{c['name']}: <b>{fmt(c['old'])} → {fmt(c['price'])} ₴</b> "
+                      f"с {date.fromisoformat(c['date']):%d.%m}\n\n"
+                      f"Проверю витрины через {CHECK_AFTER_MIN} минут.")
         except cappi.PriceOrderExists as e:
             other = date.fromisoformat(c["date"]) + timedelta(days=1)
             say(chat,
@@ -1253,11 +1550,6 @@ def on_button(q):
                 f"Поставь на другую дату: <code>/set {c['code']} {fmt(c['price'])} "
                 f"{other:%d.%m}</code> — или поправь приказ №{e.number} "
                 f"в Syrve руками.")
-            return
-            say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён\n"
-                      f"{c['name']}: <b>{fmt(c['old'])} → {fmt(c['price'])} ₴</b> "
-                      f"с {date.fromisoformat(c['date']):%d.%m}\n\n"
-                      f"Проверю витрины через {CHECK_AFTER_MIN} минут.")
         except Exception as e:
             say(chat, f"❌ Не получилось: {e}")
 
@@ -1268,21 +1560,38 @@ def on_button(q):
 # unknown.log и раз в пару дней разобрать. Порядок важен: первое совпадение
 # выигрывает, поэтому узкие правила стоят выше широких.
 ФРАЗЫ = [
-    # показатели
+    # ── показатели. Порядок важен: узкое выше широкого, иначе широкое
+    # правило съедает уточнение. «итоги за вчера» должны дать ВЧЕРА, а не
+    # сегодняшний незакрытый день.
+    (r"^(за\s+)?позавчера", lambda chat, m, txt: cmd_report(
+        chat, date.today() - timedelta(days=2), live=False)),
+    # Уточнённые экраны со словом «вчера» — раньше их перехватывал отчёт.
+    (r"^(причин\w*\s+отмен|отмен\w*)\s+(за\s+)?вчера",
+     lambda chat, m, txt: cmd_cancels(chat, date.today() - timedelta(days=1))),
+    (r"^(списан|удален)\w*\s+(за\s+)?вчера",
+     lambda chat, m, txt: cmd_deletions(chat, date.today() - timedelta(days=1))),
+    (r"(^|\s)(за\s+)?вчера\b", lambda chat, m, txt: cmd_report(
+        chat, date.today() - timedelta(days=1), live=False)),
     (r"^(выручк|показател|как дела|что по деньгам|итог|сводк|результат)",
      lambda chat, m, txt: cmd_report(chat, None, live=True)),
-    (r"(за )?вчера", lambda chat, m, txt: cmd_report(
-        chat, date.today() - timedelta(days=1), live=False)),
-    (r"^(за )?(позавчера)", lambda chat, m, txt: cmd_report(
-        chat, date.today() - timedelta(days=2), live=False)),
     (r"^(выбер|выбрать день|календар|за день|какой день)",
      lambda chat, m, txt: cmd_pick_day(chat)),
     (r"^(за )?(\d+) дн", lambda chat, m, txt: cmd_report(
         chat, date.today() - timedelta(days=int(m.group(2))), live=False)),
-    (r"^(за )?(\d{1,2})\.(\d{1,2})(\.(\d{4}))?$",
-     lambda chat, m, txt: cmd_report(
-         chat, date(int(m.group(5) or date.today().year),
-                    int(m.group(3)), int(m.group(2))), live=False)),
+    # Дата — только с ведущим нулём или явным «за»/годом, иначе «0.5» и
+    # «1.5» (объём напитка) уходили в отчёт вместо поиска позиции.
+    (r"^(за\s+)(\d{1,2})\.(\d{1,2})(\.(\d{4}))?$|^(\d{2})\.(\d{2})(\.\d{4})?$",
+     lambda chat, m, txt: _отчёт_за_дату(chat, m)),
+    (r"^(план|сколько нужно|сколько надо)", lambda chat, m, txt: cmd_plan(chat, "")),
+    (r"(в работе|сейчас готов|активные заказ|что готовится)",
+     lambda chat, m, txt: cmd_live(chat)),
+    (r"(причин\w*\s+отмен|^отмен|сколько отмен)",
+     lambda chat, m, txt: cmd_cancels(chat)),
+    (r"^(списан|удален|что списал)", lambda chat, m, txt: cmd_deletions(chat)),
+    (r"^(акци|скидк|что по акци)", lambda chat, m, txt: cmd_promo(chat)),
+    (r"^(спец|спецпредлож)", lambda chat, m, txt: cmd_special(chat)),
+
+    # цены
     (r"^(план|сколько нужно|сколько надо)", lambda chat, m, txt: cmd_plan(chat, "")),
     (r"(в работе|сейчас готов|активные заказ|что готовится)",
      lambda chat, m, txt: cmd_live(chat)),
@@ -1410,11 +1719,13 @@ def cmd_live(chat):
     say(chat, "\n".join(строки))
 
 
-def cmd_cancels(chat):
+def cmd_cancels(chat, day=None):
+    day = day or date.today()
     with cappi.Syrve() as s:
-        от = report.cancels(s, date.today())
-        уд = report.removals(s, date.today())
-    строки = [f"❌ <b>Отмен сегодня: {sum(от.values())}</b>"]
+        от = report.cancels(s, day)
+        уд = report.removals(s, day)
+    когда = "сегодня" if day == date.today() else f"{day:%d.%m}"
+    строки = [f"❌ <b>Отмен {когда}: {sum(от.values())}</b>"]
     строки += [f"    {п} — {n}" for п, n in sorted(от.items(), key=lambda x: -x[1])]
     if уд:
         строки += ["", f"🗑 <b>Удалено блюд: {sum(v['штук'] for v in уд.values()):.0f}</b>"]
@@ -1484,6 +1795,7 @@ def не_понял(chat, текст, кто):
     """Записываем непонятое — это материал для ревизии, а не мусор."""
     with open(UNKNOWN, "a") as f:
         f.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{кто}\t{текст[:200]}\n")
+    bugs.записать("непонял", текст[:200], где="свободный текст", кто=кто)
 
 
 def cmd_unknown(chat, n=25):
@@ -2002,6 +2314,41 @@ def разобрать_тайники(текст):
     return из
 
 
+def _отчёт_за_дату(chat, m):
+    """Отчёт за дату из текста. Несуществующее число — внятный ответ,
+    а не «day is out of range» в лицо."""
+    д, мес, год = (m.group(2), m.group(3), m.group(5)) if m.group(2) \
+        else (m.group(6), m.group(7), (m.group(8) or "").lstrip("."))
+    try:
+        цель = date(int(год) if год else date.today().year, int(мес), int(д))
+    except ValueError:
+        return say(chat, f"Такой даты нет: <b>{д}.{мес}</b>")
+    if цель > date.today():
+        return say(chat, f"{цель:%d.%m} ещё не наступило.")
+    cmd_report(chat, цель, live=(цель == date.today()))
+
+
+def сохранить_тайники(chat, разобрано, месяц=None):
+    """Записывает результат тайного гостя и показывает, что получилось.
+
+    Была вызвана из двух мест и нигде не определена — бот падал ровно на
+    том пути, ради которого всё делалось: маркетолог пишет «Лазарева 5/4».
+    """
+    d = kpi.тайники(месяц) or {}
+    d.update(разобрано)
+    kpi.тайники(месяц, d)
+    строки = ["🕵️ <b>Записал</b>", ""]
+    for точка, v in разобрано.items():
+        проц = v["пройдено"] / v["всего"] * 100 if v.get("всего") else 0
+        строки.append(f"  {точка} — {v['пройдено']} из {v['всего']} = <b>{проц:.0f}%</b>")
+    всего = sum(v.get("всего", 0) for v in d.values())
+    пройдено = sum(v.get("пройдено", 0) for v in d.values())
+    if всего:
+        строки += ["", f"по сети: <b>{пройдено / всего * 100:.0f}%</b> "
+                       f"({пройдено} из {всего})"]
+    say(chat, "\n".join(строки))
+
+
 def cmd_secret(chat, args):
     """Внести результат тайного гостя: /secret Лазарева 3 4"""
     if not access.можно(chat, "показатели"):
@@ -2068,6 +2415,180 @@ def cmd_pick_shift_day(chat, сдвиг=0):
     say(chat, "Смена за какой день?", inline=кнопки)
 
 
+# ------------------------------------------------------------ время работы
+# Один вопрос «почему долго везём» разбит на три ответа: кухня, админ,
+# курьер. Пока показывали общее время доставки, разговор всегда упирался в
+# «это не мы» — теперь у каждого куска свой хозяин и своя цель.
+ПОДПИСИ_ВРЕМЕНИ = [
+    ("кухня", "Кухня", "готовят"),
+    ("админ", "Админ", "собирают и отдают"),
+    ("курьер", "Курьер", "в пути"),
+]
+
+
+def склонение(n, один, два, много):
+    """«43 заказов» — мелочь, из которой складывается ощущение, что писал
+    робот. Пишем по-русски."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        сл = один
+    elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        сл = два
+    else:
+        сл = много
+    return f"{n} {сл}"
+
+
+def мин(x):
+    """Минуты с одним знаком. «21.3667 мин» — это не точность, это шум:
+    решение принимают по десятым, остальное только мешает читать."""
+    return f"{x:.1f}".rstrip("0").rstrip(".")
+
+
+def _знак(факт, цель_):
+    """Цель — не украшение, поэтому пишем не только «сколько», но и «на
+    сколько мимо». Иначе цифру читают, а вывод не делают."""
+    if цель_ is None:
+        return ""
+    разница = факт - цель_
+    if разница <= 0:
+        return f"  ✅ <i>цель {мин(цель_)}</i>"
+    return f"  ⚠️ <i>цель {мин(цель_)}, +{мин(разница)}</i>"
+
+
+def _блок_времени(точки, заголовок):
+    строки = [f"<b>{заголовок}</b>"]
+    for точка, v in sorted(точки.items()):
+        цель_доставки = sum(report.цель(k, точка) or 0
+                            for k, *_ in ПОДПИСИ_ВРЕМЕНИ)
+        строки.append("")
+        строки.append(f"<b>{точка}</b>  <i>{склонение(v['заказов'], 'заказ', 'заказа', 'заказов')}</i>")
+        for ключ, имя, что in ПОДПИСИ_ВРЕМЕНИ:
+            строки.append(f"{имя}: <b>{мин(v[ключ])} мин</b>"
+                          f"{_знак(v[ключ], report.цель(ключ, точка))}")
+        строки.append(f"Доставка без КЦ: <b>{мин(v['доставка'])} мин</b>"
+                      f"{_знак(v['доставка'], цель_доставки or None)}")
+    if not точки:
+        строки.append("\nНет данных за этот период.")
+    return "\n".join(строки)
+
+
+def cmd_время(chat, период="день"):
+    """Времена за период плюс разбивка — по дням, неделям или месяцам."""
+    сегодня = date.today()
+    with cappi.Syrve() as s:
+        if период == "день":
+            с = по = сегодня - timedelta(days=1)
+            заголовок = f"⏱ Время работы · вчера, {с:%d.%m}"
+            точки = report.времена(s, с, по)
+            ряды = report.времена_по_дням(s, сегодня - timedelta(days=7), сегодня)
+            хвост = _тренд({d: v for d, v in ряды.items()},
+                           lambda d: f"{date.fromisoformat(d):%d.%m}")
+        elif период == "неделя":
+            недели = report.времена_по_неделям(s, недель=6)
+            ключ = list(недели)[-1]
+            заголовок = (f"⏱ Время работы · эта неделя, "
+                         f"с {недели[ключ]['с']:%d.%m}")
+            точки = недели[ключ]["точки"]
+            хвост = _тренд({k: v["точки"] for k, v in недели.items()},
+                           lambda k: f"{date.fromisoformat(k):%d.%m}")
+        else:
+            месяцы = report.времена_по_месяцам(s, месяцев=6)
+            ключ = list(месяцы)[-1]
+            заголовок = f"⏱ Время работы · этот месяц"
+            точки = месяцы[ключ]["точки"]
+            хвост = _тренд({k: v["точки"] for k, v in месяцы.items()},
+                           lambda k: МЕСЯЦЫ_КОРОТКО[int(k[-2:]) - 1])
+
+    кнопки = [[{"text": t, "callback_data": f"вр:{p}"}
+               for t, p in (("День", "день"), ("Неделя", "неделя"),
+                            ("Месяц", "месяц")) if p != период]]
+    say(chat, _блок_времени(точки, заголовок) + хвост, inline=кнопки)
+
+
+МЕСЯЦЫ_КОРОТКО = ["янв", "фев", "мар", "апр", "май", "июн",
+                  "июл", "авг", "сен", "окт", "ноя", "дек"]
+
+
+def _тренд(ряды, подпись):
+    """Динамика доставки по периодам. Одно число без вчерашнего — просто
+    число; рядом с прошлым оно уже становится «лучше» или «хуже»."""
+    if len(ряды) < 2:
+        return ""
+    out = ["", "", "<b>Доставка без КЦ, динамика</b>"]
+    for ключ, точки in list(ряды.items())[-8:]:
+        куски = "  ".join(f"{т[:3]} <b>{мин(v['доставка'])}</b>"
+                          for т, v in sorted(точки.items()))
+        out.append(f"{подпись(ключ)}:  {куски}")
+    return "\n".join(out)
+
+
+
+# ------------------------------------------------------------- журнал сбоев
+# Смысл экрана не в том, чтобы показать ошибки, а в том, чтобы их закрывали.
+# Поэтому здесь не лента, а список проблем со статусом: пока проблему не
+# пометили, она остаётся наверху и мозолит глаза.
+def cmd_bugs(chat, дней=14, тип=None):
+    if not access.можно(chat, "админка"):
+        return say(chat, "Только админ.")
+    группы = bugs.группы(дней=дней, тип=тип)
+    св = bugs.сводка(дней)
+    if not группы:
+        return say(chat, f"🐞 <b>Чисто</b>\nЗа {дней} дней ни падений, "
+                         f"ни непонятых запросов.\n\n"
+                         f"<i>Починенное скрыто — вернётся, если повторится.</i>")
+    out = [f"🐞 <b>Журнал сбоев</b> · {дней} дней",
+           f"{склонение(св['проблем'], 'проблема', 'проблемы', 'проблем')}, "
+           f"{склонение(св['случаев'], 'случай', 'случая', 'случаев')}"
+           + (f", из них падений {св['падений']}" if св["падений"] else ""), ""]
+    кнопки = []
+    for g in группы[:10]:
+        когда = datetime.fromisoformat(str(g["последний"]))
+        метка = "🆕" if g["статус"] == "новый" else "🔧"
+        место = f" · {g['где']}" if g["где"] else ""
+        out.append(f"{метка} {bugs.ТИПЫ.get(g['тип'], g['тип'])}{место}")
+        out.append(f"   <code>{g['что'][:70]}</code>")
+        out.append(f"   <i>{склонение(g['раз'], 'раз', 'раза', 'раз')}, "
+                   f"последний {когда:%d.%m %H:%M}</i>")
+        out.append("")
+        кнопки.append([{"text": f"{g['что'][:22]} · {g['раз']}",
+                        "callback_data": f"bg:{g['id']}"}])
+    if len(группы) > 10:
+        out.append(f"<i>…и ещё {len(группы) - 10}</i>")
+    кнопки.append([{"text": "💥 Только падения", "callback_data": "bf:сбой"},
+                   {"text": "🗣 Непонятые", "callback_data": "bf:непонял"}])
+    кнопки.append([{"text": "Всё за 60 дней", "callback_data": "bd:60"}])
+    say(chat, "\n".join(out), inline=кнопки)
+
+
+def cmd_bug_карточка(chat, ид):
+    g = next((x for x in bugs.группы(дней=365, скрывать_починенные=False)
+              if x["id"] == ид), None)
+    if not g:
+        return say(chat, "Такой записи нет — возможно, её вычистили по сроку.")
+    out = [f"{bugs.ТИПЫ.get(g['тип'], g['тип'])}",
+           f"<b>{g['что'][:200]}</b>", ""]
+    if g["где"]:
+        out.append(f"где: <code>{g['где']}</code>")
+    out.append(f"случаев: <b>{g['раз']}</b>  ·  статус: <b>{g['статус']}</b>")
+    out.append(f"впервые: {datetime.fromisoformat(str(g['первый'])):%d.%m %H:%M}  ·  "
+               f"последний: {datetime.fromisoformat(str(g['последний'])):%d.%m %H:%M}")
+    if g["люди"]:
+        out.append(f"у кого: {', '.join(g['люди'][:5])}")
+    if len(set(g["примеры"])) > 1:
+        out += ["", "<b>Примеры</b>"] + [f"  <code>{p[:70]}</code>"
+                                         for p in dict.fromkeys(g["примеры"])]
+    if g["детали"]:
+        хвост = g["детали"].strip().splitlines()[-12:]
+        out += ["", "<b>Что именно упало</b>",
+                "<pre>" + html.escape("\n".join(хвост)) + "</pre>"]
+    say(chat, "\n".join(out), inline=[
+        [{"text": "✅ Починено", "callback_data": f"bs:{ид}:починен"},
+         {"text": "🙈 Не баг", "callback_data": f"bs:{ид}:не баг"}],
+        [{"text": "🔧 Взял в работу", "callback_data": f"bs:{ид}:в работе"}],
+        [{"text": "◀️ К списку", "callback_data": "bd:14"}]])
+
+
 BUTTONS = {
     "🤖 джамшут": lambda chat: открыть(chat, "джамшут",
         "<b>Джамшут</b>\nБот закрытия зон. Core им управляет, он Core не видит."),
@@ -2114,6 +2635,7 @@ BUTTONS = {
                                           live=False),
     "📅 выбрать день": cmd_pick_day,
     "🎯 план": lambda chat: cmd_plan(chat, ""),
+    "⏱ время работы": cmd_время,
     "🚧 зоны": cmd_zones,
     "😠 жалобы": cmd_complaints,
 
@@ -2123,6 +2645,7 @@ BUTTONS = {
     "👥 доступ": cmd_access,
     "🗣 непонятые": cmd_unknown,
     "🔐 отказы": cmd_denied,
+    "🐞 сбои": cmd_bugs,
     "🤖 состояние бота": cmd_botstate,
 }
 
@@ -2240,6 +2763,10 @@ def on_message(m):
              if re.match(r"\s*(пн|вт|ср|чт|пт|сб|вс)\b", l.strip().lower())) >= 3:
         # Вставили таблицу плана — понятно и без команды.
         cmd_plan(chat, text)
+    elif похоже_на_список(text):
+        # Прейскурант прислали как есть, из таблицы. Раньше на это отвечало
+        # «Не понял» — и человек шёл делать тридцать /set руками.
+        cmd_price_list(chat, text, who)
     else:
         низ = text.strip().lower()
         if re.fullmatch(r"\d{7,12}", низ) and access.можно(chat, "доступ"):
@@ -2265,6 +2792,7 @@ def on_message(m):
                              f"<i>Записал — разберём на ревизии. "
                              f"Пока попробуй кнопки или /help.</i>")
         cmd_price(chat, text)
+
 
 
 # ---------------------------------------------------------------- главный цикл
@@ -2305,10 +2833,20 @@ def main():
                         on_message(u["message"])
                 except Exception as e:
                     traceback.print_exc()
+                    что = ((u.get("message") or {}).get("text")
+                           or (u.get("callback_query") or {}).get("data") or "?")
+                    кто = ((u.get("message") or u.get("callback_query")
+                            or {}).get("from") or {}).get("id")
+                    ид = bugs.сбой(f"на «{что[:40]}»", e, кто=кто)
                     chat = ((u.get("message") or u.get("callback_query", {}).get("message")
                              or {}).get("chat") or {}).get("id")
                     if chat:
-                        say(chat, f"❌ Ошибка: {e}")
+                        # Человек должен понимать, что об этом уже знают, а не
+                        # гадать, дошло ли до кого-нибудь.
+                        say(chat, f"❌ Сломалось на «{что[:40]}».\n"
+                                  f"<i>Записал в журнал ошибок"
+                                  f"{f' — {ид}' if ид else ''}, разберём. "
+                                  f"Данные не пострадали.</i>")
         except Exception:
             traceback.print_exc()
             time.sleep(5)

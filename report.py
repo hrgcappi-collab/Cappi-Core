@@ -689,3 +689,129 @@ if __name__ == "__main__":
     d = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date.today()
     import re
     print(re.sub(r"</?[bi]>", "", render(collect(d), live=(d == date.today()))))
+
+
+# ------------------------------------------------------------ время работы
+# Цепочка «заказ принят → еда готова → курьер доехал» разбита на три куска,
+# и у каждого свой хозяин: кухня, админ, курьер. Общее «время доставки»
+# ничего не говорит о том, кто именно тормозит, — поэтому считаем по частям.
+#
+# Админ считается вычитанием: время в пречеке включает дорогу, а работа
+# админа — это то, что осталось, когда дорогу вычли.
+ЦЕЛИ_ВРЕМЕНИ = {
+    "кухня":   {"Лазарева": 25.0, "Левитана": 20.0},
+    "админ":   {"Лазарева": 15.0, "Левитана": 15.0},
+    "курьер":  {"Лазарева": 18.0, "Левитана": 18.0},
+}
+
+# Только блюда и только неудалённые заказы: удалённый заказ никто не готовил,
+# а товар со склада не проходит через кухню и занижал бы её время.
+ТОЛЬКО_БЛЮДА = {
+    **НЕ_УДАЛЁННЫЕ,
+    "DishType": {"filterType": "IncludeValues", "values": ["DISH"]},
+}
+
+
+def цель(что, филиал):
+    return ЦЕЛИ_ВРЕМЕНИ.get(что, {}).get(филиал)
+
+
+def _время_olap(s, с, по, поля):
+    body = {
+        "reportType": "SALES", "buildSummary": False,
+        "groupByRowFields": поля,
+        "aggregateFields": ["Cooking.KitchenTime.Avg",
+                            "OrderTime.AveragePrechequeTime",
+                            "Delivery.WayDurationAvg", "UniqOrderId"],
+        "filters": {
+            "OpenDate.Typed": {"filterType": "DateRange", "periodType": "CUSTOM",
+                               "from": с.isoformat(),
+                               "to": (по + timedelta(days=1)).isoformat()},
+            **ТОЛЬКО_БЛЮДА,
+        },
+    }
+    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
+                    body, timeout=180)
+    return r.get("data", [])
+
+
+def _строка_времени(r):
+    кухня = (r.get("Cooking.KitchenTime.Avg") or 0) / 60      # отдаётся в секундах
+    пречек = r.get("OrderTime.AveragePrechequeTime") or 0
+    путь = r.get("Delivery.WayDurationAvg") or 0
+    админ = пречек - путь
+    return {"кухня": кухня, "админ": админ, "курьер": путь,
+            "доставка": кухня + админ + путь, "пречек": пречек,
+            "заказов": r.get("UniqOrderId") or 0}
+
+
+def времена(s, с, по):
+    """Средние времена по филиалам за период.
+
+    Период спрашиваем у Syrve целиком, а не складываем дневные средние:
+    среднее средних врёт тем сильнее, чем неровнее загрузка по дням, а
+    неровная она всегда — пятница и вторник несопоставимы.
+    """
+    out = {}
+    for r in _время_olap(s, с, по, ["RestaurantSection"]):
+        имя = СЛИВАТЬ.get(r.get("RestaurantSection"), r.get("RestaurantSection"))
+        точка = ТОЧКИ.get(имя)
+        if not точка:
+            continue
+        было = out.get(точка)
+        новое = _строка_времени(r)
+        if было is None:
+            out[точка] = новое
+        else:
+            # Махачкалинская вливается в Лазареву: складываем средние с
+            # весом по числу заказов, иначе маленькая точка перевесит.
+            n1, n2 = было["заказов"], новое["заказов"]
+            всего = n1 + n2 or 1
+            out[точка] = {k: (было[k] * n1 + новое[k] * n2) / всего
+                          for k in ("кухня", "админ", "курьер", "доставка",
+                                    "пречек")}
+            out[точка]["заказов"] = всего
+    return out
+
+
+def времена_по_дням(s, с, по):
+    """Разбивка по дням — чтобы видеть не «в среднем плохо», а какой день."""
+    out = {}
+    for r in _время_olap(s, с, по, ["OpenDate.Typed", "RestaurantSection"]):
+        имя = СЛИВАТЬ.get(r.get("RestaurantSection"), r.get("RestaurantSection"))
+        точка = ТОЧКИ.get(имя)
+        д = (r.get("OpenDate.Typed") or "")[:10]
+        if not точка or not д:
+            continue
+        out.setdefault(д, {})[точка] = _строка_времени(r)
+    return dict(sorted(out.items()))
+
+
+def времена_по_неделям(s, недель=8):
+    """По неделям: каждую неделю спрашиваем отдельно, снова чтобы не
+    усреднять средние."""
+    сегодня = date.today()
+    старт = сегодня - timedelta(days=сегодня.weekday() + 7 * (недель - 1))
+    out = {}
+    for i in range(недель):
+        н = старт + timedelta(days=7 * i)
+        к = min(н + timedelta(days=6), сегодня)
+        if н > сегодня:
+            break
+        out[н.isoformat()] = {"с": н, "по": к, "точки": времена(s, н, к)}
+    return out
+
+
+def времена_по_месяцам(s, месяцев=6):
+    сегодня = date.today()
+    out = {}
+    г, м = сегодня.year, сегодня.month
+    периоды = []
+    for _ in range(месяцев):
+        периоды.append((г, м))
+        г, м = (г - 1, 12) if м == 1 else (г, м - 1)
+    for г, м in reversed(периоды):
+        н = date(г, м, 1)
+        к = min(date(г + (м == 12), м % 12 + 1, 1) - timedelta(days=1), сегодня)
+        out[f"{г}-{м:02d}"] = {"с": н, "по": к, "точки": времена(s, н, к)}
+    return out
