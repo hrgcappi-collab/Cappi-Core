@@ -286,6 +286,36 @@ def cancels(s, day):
     return out
 
 
+# Списания, которые не считаются потерей: плановый маркетинг. Их много и
+# они запланированы, поэтому в алертах они только шумели бы, заглушая
+# настоящие — «Со списанием» и «за счёт компании», которых пара в день.
+НЕ_ПОТЕРЯ = ("Реклама Блогеров",)
+
+
+def deletions(s, day, всё=False):
+    """Удаления блюд СО СПИСАНИЕМ — поштучно, с чеком, причиной иофициантом.
+
+    Сумму берём без скидки (DishSumInt): списанное по акции в сумме со
+    скидкой выглядит бесплатным, хотя себестоимость никуда не делась.
+    """
+    rows = _olap(s, day,
+                 ["OrderNum", "DishName", "RemovalType", "RestaurantSection",
+                  "OrderWaiter.Name", "HourClose"],
+                 ["DishSumInt", "DishAmountInt"],
+                 {"DeletedWithWriteoff": {"filterType": "IncludeValues",
+                                          "values": ["DELETED_WITH_WRITEOFF"]}})
+    out = [{"чек": r.get("OrderNum"), "блюдо": r.get("DishName") or "?",
+            "причина": r.get("RemovalType") or "—",
+            "зал": r.get("RestaurantSection") or "—",
+            "кто": r.get("OrderWaiter.Name") or "—",
+            "час": r.get("HourClose") or "",
+            "сумма": r.get("DishSumInt", 0) or 0,
+            "штук": r.get("DishAmountInt", 0) or 0} for r in rows]
+    if всё:
+        return out
+    return [x for x in out if x["причина"] not in НЕ_ПОТЕРЯ]
+
+
 def removals(s, day):
     """Удаления блюд по причинам — соседний показатель, часто нужен вместе."""
     rows = _olap(s, day, ["RemovalType"], ["UniqOrderId"])

@@ -26,6 +26,7 @@ STATE_DIR = os.path.expanduser("~/.cappi")
 PENDING = os.path.join(STATE_DIR, "pending.json")   # отложенные проверки витрин
 AUDIT = os.path.join(STATE_DIR, "changes.log")      # журнал изменений цен
 UNKNOWN = os.path.join(STATE_DIR, "unknown.log")    # что бот не понял — на ревизию
+ALERTS = os.path.join(STATE_DIR, "alerts_seen.json")  # о чём уже сообщали
 
 REPORT_AT = "22:00"         # когда присылать итоги дня
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
@@ -56,6 +57,7 @@ _lock = threading.Lock()
     # но цена и наличие — разные вещи, и путать их не стоит.
     "продажи": [["🛑 Стоп-лист"],
                 ["🚚 В работе", "❌ Отмены"],
+                ["🗑 Списания"],
                 ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
                    ["📅 Выбрать день"],
@@ -691,6 +693,80 @@ def _зона_изменилась(e):
             pass
 
 
+def _виденное(раздел):
+    try:
+        return set(json.load(open(ALERTS)).get(раздел, []))
+    except Exception:
+        return set()
+
+
+def _запомнить(раздел, ключи):
+    try:
+        d = json.load(open(ALERTS))
+    except Exception:
+        d = {}
+    # Держим только сегодняшнее: вчерашние ключи ни с чем не сравниваются,
+    # а файл иначе растёт без конца.
+    d[раздел] = sorted(ключи)
+    json.dump(d, open(ALERTS, "w"), ensure_ascii=False)
+
+
+def _watch_losses(последний):
+    """Списания блюд и правки явок — то, что происходит тихо.
+
+    Обе вещи законны по отдельности и обе стоят денег. Списание видно
+    только в отчёте назавтра, правка явки — вообще нигде. Раз в десять
+    минут сверяемся с тем, о чём уже сообщали, и говорим только о новом.
+    """
+    if time.time() - последний[0] < 600:
+        return
+    последний[0] = time.time()
+    сегодня = date.today()
+    try:
+        with cappi.Syrve() as s:
+            списания = report.deletions(s, сегодня)
+            явки = report.attendance(s, сегодня)
+    except Exception:
+        return
+
+    # ── списания со списанием
+    было = _виденное(f"списания:{сегодня}")
+    новые = [x for x in списания
+             if f"{x['чек']}|{x['блюдо']}|{x['причина']}" not in было]
+    if новые:
+        сумма = sum(x["сумма"] for x in новые)
+        строки = [f"🗑 <b>Списано за счёт компании: {len(новые)}</b>"
+                  + (f" на {report.money(сумма)} ₴" if сумма else "")]
+        for x in новые[:12]:
+            строки.append(f"    {x['блюдо'][:30]} — {report.money(x['сумма'])} ₴"
+                          f"\n      чек {x['чек']} · {x['причина'][:24]} · {x['кто'][:20]}")
+        for uid in access.подписчики_отчёта():
+            try:
+                say(uid, "\n".join(строки))
+            except Exception:
+                pass
+    _запомнить(f"списания:{сегодня}",
+               [f"{x['чек']}|{x['блюдо']}|{x['причина']}" for x in списания])
+
+    # ── правки явок задним числом
+    было = _виденное(f"правки:{сегодня}")
+    правки = явки.get("правки") or []
+    новые = [p for p in правки
+             if f"{p['кто']}|{p['смена']}|{p['правил']}" not in было]
+    if новые:
+        строки = [f"⚠️ <b>Правки явок задним числом: {len(новые)}</b>"]
+        for p in новые[:10]:
+            строки.append(f"    {p['кто'][:24]} · {p['роль']} · смена {p['смена']}"
+                          f"\n      правка через {p['через']:.0f} мин, {p['правил']}")
+        for uid in access.подписчики_отчёта():
+            try:
+                say(uid, "\n".join(строки))
+            except Exception:
+                pass
+    _запомнить(f"правки:{сегодня}",
+               [f"{p['кто']}|{p['смена']}|{p['правил']}" for p in правки])
+
+
 def _watch_stoplist(последний):
     """Раз в пять минут смотрим, что появилось в стопе и что ушло.
 
@@ -731,11 +807,13 @@ def watcher():
     sent = {}
     последний_опрос = [0.0]
     последний_стоп = [0.0]
+    последний_потери = [0.0]
     while True:
         try:
             _send_daily(sent)
             _pull_zones(последний_опрос)
             _watch_stoplist(последний_стоп)
+            _watch_losses(последний_потери)
             keep = []
             for it in load_pending():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
@@ -914,6 +992,7 @@ def on_button(q):
     (r"(в работе|сейчас готов|активные заказ|что готовится)",
      lambda chat, m, txt: cmd_live(chat)),
     (r"^(отмен|сколько отмен|причины отмен)", lambda chat, m, txt: cmd_cancels(chat)),
+    (r"^(списан|удален|что списал)", lambda chat, m, txt: cmd_deletions(chat)),
 
     # цены
     (r"^(стоп|что в стопе|стоп.?лист)", lambda chat, m, txt: cmd_stoplist(chat)),
