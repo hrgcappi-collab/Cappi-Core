@@ -22,6 +22,12 @@ AUDIT = os.path.join(STATE_DIR, "changes.log")      # журнал измене�
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
 MAX_CHANGE_PCT = 50         # скачок больше этого бот не проводит
 
+# Цену по умолчанию меняем следующей датой: приказ вступает в силу, когда
+# закроется ночная кассовая смена, около трёх ночи. Так цена не прыгает
+# посреди рабочего дня и не задевает уже открытые смены и принятые заказы.
+DEFAULT_TOMORROW = True
+СЕГОДНЯ_СЛОВА = ("сегодня", "сейчас", "today", "now", "срочно")
+
 _confirm = {}               # токен → подготовленное изменение
 _await = {}                 # чат → чего ждём от следующего сообщения
 _lock = threading.Lock()
@@ -171,10 +177,14 @@ HELP = f"""<b>Бот цен Cappi</b>
 Кнопки снизу — основное. Командами тоже можно:
 
 <code>/price окрошка</code> — найти позицию
-<code>/set 03275 46</code> — сменить цену
-<code>/set 03275 46 завтра</code> — приказ на завтра
+<code>/set 03275 46</code> — сменить цену (вступит в силу ночью)
+<code>/set 03275 46 сейчас</code> — поменять прямо сейчас
 <code>/check</code> — сверка витрин
 <code>/pending</code> — что стоит на проверке
+
+По умолчанию цена меняется <b>ночью</b>: приказ ставится на следующую дату
+и срабатывает, когда закроется кассовая смена, около 3:00. Так цена не
+прыгает посреди дня и не задевает уже принятые заказы.
 
 Как это работает: бот создаёт в Syrve приказ об изменении прейскуранта.
 Выгрузка на сайт идёт автоматически раз в 20 минут, Glovo подтягивается
@@ -241,11 +251,17 @@ def cmd_pending(chat):
     if not items:
         return say(chat, "Ничего не стоит на проверке.")
     say(chat, "\n".join(
-        f"<code>{i['code']}</code> {i['name'][:30]} → {fmt(i['price'])} ₴  "
-        f"проверю в {datetime.fromisoformat(i['due']):%H:%M}" for i in items))
+        f"<code>{i['code']}</code> {i['name'][:28]} → {fmt(i['price'])} ₴\n"
+        f"     {'приказ принят?' if i.get('stage') == 'planned' else 'витрины'}"
+        f" — {datetime.fromisoformat(i['due']):%d.%m %H:%M}" for i in items))
 
 
 # --------------------------------------------------------------- смена цены
+def _default_date():
+    """Завтра — чтобы цена сменилась ночью, а не в рабочий день."""
+    return date.today() + timedelta(days=1) if DEFAULT_TOMORROW else date.today()
+
+
 def prepare(chat, code, new_price, when, user):
     """Готовим изменение и показываем карточку подтверждения. Ещё ничего не меняем."""
     hits = [h for h in find(code) if str(h[0]).lower() == str(code).lower()]
@@ -274,17 +290,21 @@ def prepare(chat, code, new_price, when, user):
         _confirm[tok] = {"pid": pid, "dep": dep, "price": new_price,
                          "date": when.isoformat(), "code": code, "name": p["name"],
                          "old": cur, "chat": chat, "user": user}
-    other = date.today() + timedelta(days=1) if when == date.today() else date.today()
+    сегодня = when == date.today()
+    other = date.today() if сегодня is False else date.today() + timedelta(days=1)
+    когда = ("<b>сейчас</b>, посреди дня — задену открытые кассовые смены"
+             if сегодня else
+             f"ночью с {date.today():%d.%m} на {when:%d.%m}, около 3:00")
     say(chat,
         f"<b>{p['name']}</b>\nартикул <code>{code}</code>\n\n"
         f"<b>{fmt(cur)} ₴  →  {fmt(new_price)} ₴</b>\n"
-        f"с {when:%d.%m.%Y}"
-        + ("  <i>(сейчас, включая открытые кассовые смены)</i>"
-           if when == date.today() else "  <i>(ночью)</i>"),
+        f"{когда}",
         inline=[
             [{"text": "✅ Провести", "callback_data": f"go:{tok}"},
              {"text": "✖️ Отмена", "callback_data": f"no:{tok}"}],
-            [{"text": f"📅 Перенести на {other:%d.%m}", "callback_data": f"dt:{tok}"}],
+            [{"text": ("⚡️ Поменять сейчас" if not сегодня
+                       else f"🌙 Лучше ночью, на {other:%d.%m}"),
+              "callback_data": f"dt:{tok}"}],
         ])
 
 
@@ -294,17 +314,67 @@ def do_change(c):
     audit(f'{c["user"]}\t{c["code"]}\t{c["name"]}\t{c["old"]} -> {c["price"]}\t'
           f'с {c["date"]}\tприказ №{doc["documentNumber"]}')
     items = load_pending()
-    items.append({**{k: c[k] for k in ("code", "name", "price", "old", "chat")},
+    сегодня = c["date"] == date.today().isoformat()
+    # Приказ на завтра проверять по витринам сегодня бессмысленно — цена ещё
+    # не должна была измениться. Сначала убеждаемся, что Syrve его принял и
+    # показывает как запланированный, а витрины смотрим уже в тот день.
+    items.append({**{k: c[k] for k in ("code", "name", "price", "old", "chat", "date")},
                   "guid": c["pid"],
                   "doc": doc["documentNumber"],
-                  "due": (datetime.now() + timedelta(minutes=CHECK_AFTER_MIN)).isoformat()})
+                  "stage": "showcase" if сегодня else "planned",
+                  "due": (datetime.now() + timedelta(
+                      minutes=CHECK_AFTER_MIN if сегодня else 5)).isoformat()})
     save_pending(items)
     return doc
 
 
 # ------------------------------------------------------- фоновая проверка
+def _check_planned(it):
+    """Приказ на будущее: он ещё не сработал, но Syrve уже должен показывать
+    его как запланированный. Это и есть доказательство, что цена сменится."""
+    p = cappi.cloud_prices().get(it["code"], {})
+    nxt, when = p.get("next"), (p.get("next_date") or "")[:10]
+    ok = nxt is not None and abs(nxt - it["price"]) < 0.01
+    when_h = datetime.fromisoformat(it["date"]).strftime("%d.%m")
+    if ok:
+        say(it["chat"],
+            f"✅ Приказ принят и стоит в очереди\n\n<b>{it['name']}</b>\n"
+            f"приказ №{it['doc']}, {fmt(it['old'])} → {fmt(it['price'])} ₴\n"
+            f"сменится ночью, {when_h} около 3:00\n\n"
+            f"<i>Проверю витрины утром {when_h}.</i>")
+    else:
+        say(it["chat"],
+            f"⚠️ Syrve не показывает запланированную цену\n\n<b>{it['name']}</b>\n"
+            f"приказ №{it['doc']} создан, но в меню нет отметки о смене на "
+            f"{fmt(it['price'])} ₴{f' (стоит {fmt(nxt)} с {when})' if nxt else ''}.\n"
+            f"Стоит открыть приказ в Syrve и проверить галочку «Приказ действует».")
+    # В любом случае смотрим витрины в день, когда цена должна смениться.
+    return {**it, "stage": "showcase",
+            "due": datetime.fromisoformat(it["date"]).replace(hour=10).isoformat()}
+
+
+def _check_showcase(it):
+    """Цена уже должна была смениться — сверяем витрины."""
+    site, glovo = where_shown(it.get("guid", ""), it["name"])
+    p = it["price"]
+    ok_site = site is not None and abs(site - p) < 0.01
+    ok_glovo = glovo is not None and abs(glovo - p) < 0.01
+    mark = lambda ok, v: ("✅" if ok else "❌") + f" {fmt(v) if v is not None else 'нет'}"
+    say(it["chat"],
+        ("✅ Цена доехала везде" if ok_site and ok_glovo
+         else "⚠️ Цена доехала не везде")
+        + f"\n\n<b>{it['name']}</b>\n"
+          f"приказ №{it['doc']}, {fmt(it['old'])} → {fmt(p)} ₴\n\n"
+          f"сайт:  {mark(ok_site, site)}\n"
+          f"Glovo: {mark(ok_glovo, glovo)}"
+        + ("" if ok_site and ok_glovo else
+           "\n\n<i>Выгрузка идёт раз в 20 минут, Glovo подтягивается позже — "
+           "до часа. Проверь ещё раз кнопкой «Сверка витрин».</i>"))
+    return None
+
+
 def watcher():
-    """Через CHECK_AFTER_MIN минут смотрим, доехала ли цена до витрин."""
+    """Догоняет отложенные проверки: сперва что приказ принят, потом витрины."""
     while True:
         try:
             keep = []
@@ -312,21 +382,10 @@ def watcher():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
                     keep.append(it)
                     continue
-                site, glovo = where_shown(it.get("guid", ""), it["name"])
-                p = it["price"]
-                ok_site = site is not None and abs(site - p) < 0.01
-                ok_glovo = glovo is not None and abs(glovo - p) < 0.01
-                mark = lambda ok, v: ("✅" if ok else "❌") + f" {fmt(v) if v is not None else 'нет'}"
-                say(it["chat"],
-                    ("✅ Цена доехала везде" if ok_site and ok_glovo
-                     else "⚠️ Цена доехала не везде")
-                    + f"\n\n<b>{it['name']}</b>\n"
-                      f"приказ №{it['doc']}, {fmt(it['old'])} → {fmt(p)} ₴\n\n"
-                      f"сайт:  {mark(ok_site, site)}\n"
-                      f"Glovo: {mark(ok_glovo, glovo)}"
-                    + ("" if ok_site and ok_glovo else
-                       "\n\n<i>Выгрузка идёт раз в 20 минут, Glovo подтягивается "
-                       "позже — до часа. Проверь ещё раз кнопкой «Сверка витрин».</i>"))
+                nxt = (_check_planned(it) if it.get("stage") == "planned"
+                       else _check_showcase(it))
+                if nxt:
+                    keep.append(nxt)
             save_pending(keep)
         except Exception:
             traceback.print_exc()
@@ -425,7 +484,7 @@ def on_message(m):
             except ValueError:
                 _await[chat] = st
                 return say(chat, f"Это не похоже на цену: <b>{text}</b>. Напиши числом.")
-            return prepare(chat, st["code"], price, date.today(), who)
+            return prepare(chat, st["code"], price, _default_date(), who)
 
     cmd, *args = text.split()
     cmd = cmd.lower().split("@")[0]
@@ -444,9 +503,9 @@ def on_message(m):
             price = float(args[1].replace(",", "."))
         except ValueError:
             return say(chat, f"Не понял цену: <b>{args[1]}</b>")
-        when = date.today()
-        if len(args) > 2 and args[2].lower() in ("завтра", "tomorrow"):
-            when += timedelta(days=1)
+        when = _default_date()
+        if len(args) > 2 and args[2].lower() in СЕГОДНЯ_СЛОВА:
+            when = date.today()
         prepare(chat, args[0], price, when, who)
     elif text.startswith("/"):
         say(chat, "Не знаю такой команды. Жми кнопки снизу или /help")
