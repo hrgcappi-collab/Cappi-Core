@@ -75,8 +75,10 @@ _lock = threading.Lock()
                  ["⚠️ Правки явок"],
                  ["◀️ Назад"]],
     # Джамшут — подчинённый бот. Core им управляет, он о Core не знает.
-    "джамшут": [["🚦 Зоны сейчас", "📜 История"],
-                ["👤 Кто закрывал", "🩺 Здоровье"],
+    "джамшут": [["🚦 Зоны сейчас"],
+                ["🚧 Закрыть зону", "✅ Открыть зону"],
+                ["📜 История", "👤 Кто закрывал"],
+                ["🩺 Здоровье"],
                 ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
                 ["🗣 Непонятые", "👥 Доступ"],
@@ -881,6 +883,58 @@ def on_button(q):
     tg("answerCallbackQuery", callback_query_id=q["id"])
     who = q["from"].get("username") or str(q["from"]["id"])
 
+    if act == "zc":                                   # выбрали зону → на сколько
+        зона = (jamshut.справочник_зон().get(int(arg)) or {}).get("name", arg)
+        return say(chat, f"На сколько закрыть <b>{зона}</b>?", inline=[
+            [{"text": f"{м} мин", "callback_data": f"zd:{arg}:{м}"} for м in (15, 30, 45)],
+            [{"text": f"{м} мин", "callback_data": f"zd:{arg}:{м}"} for м in (60, 90, 120)],
+        ])
+
+    if act == "zd":                                   # подтверждение закрытия
+        зид, _, минут = arg.partition(":")
+        z = jamshut.справочник_зон().get(int(зид)) or {}
+        return say(chat,
+            f"🚧 Закрыть <b>{z.get('name', зид)}</b>\n"
+            f"район: {z.get('district', '—')}\n"
+            f"на <b>{минут} мин</b>\n\n"
+            f"<i>Доставка в эту зону прекратится сразу.</i>",
+            inline=[[{"text": "✅ Закрыть", "callback_data": f"zy:{зид}:{минут}"},
+                     {"text": "✖️ Отмена", "callback_data": "no:—"}]])
+
+    if act in ("zy", "zo"):                           # выполняем
+        if not access.можно(chat, "зоны"):
+            return say(chat, "Только оператор или админ.")
+        зид, _, минут = arg.partition(":")
+        z = jamshut.справочник_зон().get(int(зид)) or {}
+        имя = z.get("name", зид)
+        try:
+            if act == "zy":
+                jamshut.закрыть_зону([int(зид)], int(минут), who, z.get("district"))
+                say(chat, f"🚧 <b>{имя}</b> закрыта на {минут} мин.")
+                audit(f"{who}\tзона\tзакрыта\t{имя}\t{минут} мин")
+            else:
+                return say(chat, f"Открыть <b>{имя}</b>?",
+                    inline=[[{"text": "✅ Открыть", "callback_data": f"zk:{зид}"},
+                             {"text": "✖️ Отмена", "callback_data": "no:—"}]])
+        except jamshut.НетУправления as e:
+            say(chat, f"⚠️ {e}")
+        except Exception as e:
+            say(chat, f"❌ Не получилось: {str(e)[:140]}")
+        return
+
+    if act == "zk":                                   # подтверждённое открытие
+        if not access.можно(chat, "зоны"):
+            return
+        z = jamshut.справочник_зон().get(int(arg)) or {}
+        имя = z.get("name", arg)
+        try:
+            jamshut.открыть_зону([int(arg)], who)
+            say(chat, f"✅ <b>{имя}</b> открыта.")
+            audit(f"{who}\tзона\tоткрыта\t{имя}")
+        except Exception as e:
+            say(chat, f"❌ Не получилось: {str(e)[:140]}")
+        return
+
     if act in ("sr", "sa"):                           # снять / поставить в стоп
         if not access.можно(chat, "цены"):
             return say(chat, "Управлять стоп-листом может оператор или админ.")
@@ -1220,12 +1274,49 @@ def cmd_jam_state(chat):
     строки = [("🔴 <b>Сейчас закрыто зон: %d</b>" % если) if если
               else "🟢 <b>Все зоны открыты</b>"]
     if если:
-        строки.append("    " + ", ".join(str(z) for z in st.get("closed", [])))
+        try:
+            зоны = jamshut.справочник_зон()
+        except Exception:
+            зоны = {}
+        for z in st.get("closed", []):
+            имя = (зоны.get(z) or {}).get("name", f"зона {z}")
+            район = (зоны.get(z) or {}).get("district", "")
+            строки.append(f"    {имя}" + (f" · {район}" if район else ""))
     строки.append(f"<i>по данным Джамшута на {(st.get('at') or '')[11:16]}</i>")
-    if access.можно(chat, "цены"):
-        строки += ["", "<i>Управление зонами из Core пока недоступно — "
-                       "у Джамшута нет управляющих ручек, только чтение.</i>"]
     say(chat, "\n".join(строки))
+
+
+def cmd_jam_close(chat):
+    """Выбор зоны для закрытия. Кнопками: номера зон никто не помнит."""
+    if not access.можно(chat, "зоны"):
+        return say(chat, "Управлять зонами может оператор или админ.")
+    try:
+        зоны = jamshut.справочник_зон()
+        закрыты = set(jamshut.состояние().get("closed") or [])
+    except Exception as e:
+        return say(chat, f"Джамшут не отвечает: {str(e)[:120]}")
+    свободные = [(i, z) for i, z in sorted(зоны.items()) if i not in закрыты]
+    if not свободные:
+        return say(chat, "Все зоны уже закрыты.")
+    say(chat, "Какую зону закрыть?", inline=[
+        [{"text": f"{z['name']} · {z.get('district', '')}",
+          "callback_data": f"zc:{i}"}] for i, z in свободные])
+
+
+def cmd_jam_open(chat):
+    """Открыть обратно — только из тех, что закрыты."""
+    if not access.можно(chat, "зоны"):
+        return say(chat, "Управлять зонами может оператор или админ.")
+    try:
+        зоны = jamshut.справочник_зон()
+        закрыты = list(jamshut.состояние().get("closed") or [])
+    except Exception as e:
+        return say(chat, f"Джамшут не отвечает: {str(e)[:120]}")
+    if not закрыты:
+        return say(chat, "🟢 Сейчас все зоны открыты — открывать нечего.")
+    say(chat, "Какую зону открыть?", inline=[
+        [{"text": (зоны.get(i) or {}).get("name", f"зона {i}"),
+          "callback_data": f"zo:{i}"}] for i in закрыты])
 
 
 def cmd_jam_history(chat, дней=7):
@@ -1480,6 +1571,8 @@ BUTTONS = {
     "🤖 джамшут": lambda chat: открыть(chat, "джамшут",
         "<b>Джамшут</b>\nБот закрытия зон. Core им управляет, он Core не видит."),
     "🚦 зоны сейчас": cmd_jam_state,
+    "🚧 закрыть зону": cmd_jam_close,
+    "✅ открыть зону": cmd_jam_open,
     "📜 история": cmd_jam_history,
     "👤 кто закрывал": cmd_jam_who,
     "🩺 здоровье": cmd_jam_health,
