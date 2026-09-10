@@ -178,7 +178,9 @@ def _needles(word):
     Кроме словаря — основа слова: «тунец» должен находить «з тунцем»,
     а окончания в украинском и русском расходятся почти всегда."""
     out = {word} | {ua for ru, ua in RU_UA.items() if ru in word}
-    if len(word) >= 5:
+    # Основу берём только у слов. У чисел она вредна: от артикула 03395
+    # остаётся «033», а это «0,33 л» в названии каждого напитка.
+    if len(word) >= 5 and not word.isdigit():
         out.add(word[:len(word) - 2])
     return out
 
@@ -188,9 +190,14 @@ def find(query):
     q = cappi.norm_full(query)
     menu = cappi.cloud_prices()
 
+    цифры = re.fullmatch(r"\d{3,}", q)
+
     def matches(code, p):
         if q == str(code).lower():
             return True
+        if цифры:
+            # Ищут артикул — значит по названию искать нечего.
+            return False
         name = cappi.norm_full(p["name"])
         alias = " ".join(ALIASES.get(code, []))
         # Каждое слово запроса должно найтись, иначе «сливочная креветка»
@@ -199,6 +206,11 @@ def find(query):
                    for w in q.split())
 
     hits = [(c, p) for c, p in menu.items() if matches(c, p)]
+    if re.fullmatch(r"\d{3,}", q):
+        # Похоже на артикул: либо он есть, либо его нет. Приблизительный
+        # поиск по цифрам выдал бы десяток случайных позиций — как было с
+        # несуществующим 03395, нашедшим двенадцать напитков.
+        return sorted(hits, key=lambda x: x[1]["name"])
     if not hits and len(q) >= 3:
         # Точного совпадения нет — пробуем приблизительно, но только тогда,
         # иначе точный запрос утонет в похожих.
@@ -289,6 +301,9 @@ def cmd_price(chat, query):
         return say(chat, "Что искать? Напиши часть названия или артикул.")
     hits = find(query)
     if not hits:
+        if re.fullmatch(r"\d{3,}", query.strip()):
+            return say(chat, f"Артикула <b>{query.strip()}</b> в меню нет.\n"
+                             f"<i>Проверь номер или найди позицию по названию.</i>")
         return say(chat, f"Не нашёл: <b>{query}</b>")
     if len(hits) == 1:
         return screen_item(chat, *hits[0])
@@ -1275,9 +1290,12 @@ def cmd_special(chat, day=None):
     """Спецпредложение — ручной список артикулов."""
     d = promo.спецпредложения()
     if not d:
-        return say(chat, "Спецпредложение пустое.\n\n"
-                         "Добавить: <code>/special 03275</code>\n"
-                         "Можно с пометкой: <code>/special 03275 новинка</code>")
+        if access.можно(chat, "цены"):
+            _await[chat] = {"what": "special"}
+            return say(chat, "Спецпредложение пустое.\n\n"
+                             "Пришли артикул — добавлю. Например <code>03275</code>.\n"
+                             "<i>Можно с пометкой: 03275 новинка сентября</i>")
+        return say(chat, "Спецпредложение пустое.")
     позиции = [{"код": к, "название": v["название"], "guid": v.get("guid")}
                for к, v in d.items()]
     _сводка_позиций(chat, day or date.today(), позиции,
@@ -1446,6 +1464,8 @@ def on_message(m):
     if st and not text.startswith("/"):
         if st["what"] == "search":
             return cmd_price(chat, text)
+        if st["what"] == "special":
+            return cmd_special_add(chat, text.split())
         if st["what"] == "price":
             try:
                 price = float(text.replace(",", ".").strip())
