@@ -27,6 +27,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 
 import cappi
+import webhook
 
 PLAN_FILE = os.path.expanduser("~/.cappi/plan.json")
 
@@ -312,6 +313,7 @@ def collect(day=None):
         d["живые"] = live_orders(day)
     except Exception as e:
         d["живые"] = {"ошибка": str(e)[:120]}
+    d["зоны"] = webhook.zones_summary(day)
     d["план"], d["план_точки"], d["план_откуда"] = plan_for(day)
     d["месяц_план"], d["месяц_всего"] = месячный_план(day)
     return d
@@ -375,6 +377,21 @@ def render(d, live=False):
         строки += ["", "🗑 Удаления блюд:"]
         for причина, n in sorted(d["удаления"].items(), key=lambda x: -x[1]):
             строки.append(f"    {причина} — {n}")
+
+    з = d.get("зоны") or {}
+    if з.get("закрытий"):
+        часы = з["минут"] / 60
+        строки += ["", f"🚧 Закрытий зон: <b>{з['закрытий']}</b>"
+                       f"  ·  <b>{часы:.1f} ч</b> суммарно"]
+        for район, r in sorted(з["по_районам"].items(), key=lambda x: -x[1]["минут"]):
+            строки.append(f"    {район} — {r['раз']} раз, {r['минут']:.0f} мин")
+        хвост = []
+        if з["ещё_закрыты"]:
+            хвост.append(f"{з['ещё_закрыты']} ещё закрыты — время по плану, не факт")
+        if з["авто"]:
+            хвост.append(f"{з['авто']} закрыты автоматически")
+        if хвост:
+            строки.append(f"    <i>{'; '.join(хвост)}</i>")
 
     ж = d.get("живые", {})
     if "ошибка" in ж:

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 import cappi
 import report
+import webhook
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 START = time.time()
@@ -48,7 +49,7 @@ _lock = threading.Lock()
              ["📊 Сверка витрин", "⏳ На проверке"],
              ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
-                   ["🎯 План"],
+                   ["🎯 План", "🚧 Зоны"],
                    ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
                 ["🗣 Непонятые", "👥 Доступ"],
@@ -550,6 +551,33 @@ def _send_daily(sent):
             traceback.print_exc()
 
 
+def _зона_изменилась(e):
+    """Пришло событие от Джамшута — сообщаем сразу, не дожидаясь отчёта.
+    Закрытая зона это деньги, которые не заработаются, пока она закрыта."""
+    закрытие = e.get("event") == "zone.close"
+    район = e.get("district") or e.get("branch") or "—"
+    ctx = e.get("context") or {}
+    штат = ctx.get("staff") or {}
+    строки = [("🚧 <b>Зона закрыта</b>" if закрытие else "✅ <b>Зона открыта</b>"),
+              f"{район} · {e.get('branch','—')}"]
+    if закрытие and e.get("duration_min"):
+        строки.append(f"на {e['duration_min']} мин")
+    кто = "автоматически" if e.get("auto") else (e.get("actor") or "—")
+    строки.append(f"кто: {кто}")
+    if ctx:
+        строки.append("")
+        строки.append(f"в работе {ctx.get('in_work','?')} · "
+                      f"кухня {ctx.get('kitchen','?')} · в пути {ctx.get('onway','?')}")
+        if штат:
+            строки.append(f"на смене: поваров {штат.get('cooks','?')}, "
+                          f"курьеров {штат.get('couriers','?')}")
+    for uid in ALLOWED:
+        try:
+            say(uid, "\n".join(строки))
+        except Exception:
+            pass
+
+
 def watcher():
     """Догоняет отложенные проверки и присылает итоги дня."""
     sent = {}
@@ -681,8 +709,7 @@ def on_button(q):
     # то, чего ещё нет — честно говорим, а не молчим
     (r"^(жалоб|негатив|отзыв)", lambda chat, m, txt: say(
         chat, "Жалобы пока не подключены — жду доступ к Loopa.")),
-    (r"^(зон|закрыт)", lambda chat, m, txt: say(
-        chat, "Закрытые зоны пока не подключены — жду доступ к Джамшуту.")),
+    (r"^(зон|закрыт)", lambda chat, m, txt: cmd_zones(chat)),
 ]
 
 
@@ -696,6 +723,20 @@ def команда_цены(chat, что, цена):
             [{"text": f"{fmt(p['price'])} ₴ · {p['name'][:32]}",
               "callback_data": f"ed:{code}"}] for code, p in hits[:12]])
     return prepare(chat, hits[0][0], float(цена), _default_date(), "текст")
+
+
+def cmd_zones(chat, day=None):
+    з = webhook.zones_summary(day or date.today())
+    if not з["закрытий"]:
+        return say(chat, "Сегодня зоны не закрывали.")
+    строки = [f"🚧 <b>Закрытий зон: {з['закрытий']}</b> · "
+              f"{з['минут'] / 60:.1f} ч суммарно", ""]
+    for район, r in sorted(з["по_районам"].items(), key=lambda x: -x[1]["минут"]):
+        строки.append(f"  {район} — {r['раз']} раз, {r['минут']:.0f} мин")
+    if з["ещё_закрыты"]:
+        строки += ["", f"<i>{з['ещё_закрыты']} ещё закрыты — "
+                       f"время посчитано по плану, а не по факту.</i>"]
+    say(chat, "\n".join(строки))
 
 
 def cmd_live(chat):
@@ -768,6 +809,7 @@ BUTTONS = {
     "📅 за вчера": lambda chat: cmd_report(chat, date.today() - timedelta(days=1),
                                           live=False),
     "🎯 план": lambda chat: cmd_plan(chat, ""),
+    "🚧 зоны": cmd_zones,
 
     # модуль «Админка»
     "🔌 проверка связи": cmd_healthcheck,
@@ -865,6 +907,12 @@ def main():
         raise SystemExit("Нет TELEGRAM_BOT_TOKEN в ~/.cappi/api.env")
     if not ALLOWED:
         print("⚠ TELEGRAM_ALLOWED_IDS пуст — бот никого не пустит")
+    порт = webhook.serve()
+    if порт:
+        webhook.СЛУШАТЕЛИ.append(_зона_изменилась)
+        print(f"приёмник событий Джамшута на порту {порт}")
+    else:
+        print("CORE_WEBHOOK_TOKEN не задан — события зон не принимаются")
     threading.Thread(target=watcher, daemon=True).start()
     tg("setMyCommands", commands=[
         {"command": "price", "description": "найти позицию и цену"},

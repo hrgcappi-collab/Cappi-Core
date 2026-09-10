@@ -8,6 +8,9 @@ menu.json
 
 # Состояние бота
 pending.json
+zone_events.jsonl
+unknown.log
+plan.json
 changes.log
 
 __pycache__/
