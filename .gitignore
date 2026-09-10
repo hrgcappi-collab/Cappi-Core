@@ -3,6 +3,9 @@ api.env
 *.env
 !api.env.example
 
+# Выгрузка меню — пересобирается, в репозитории не нужна
+menu.json
+
 # Состояние бота
 pending.json
 changes.log

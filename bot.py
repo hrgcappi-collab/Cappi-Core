@@ -88,6 +88,20 @@ RU_UA = {
 }
 
 
+def load_aliases():
+    """Словарь написаний из aliases.json. Пересобирается `python3 aliases.py`,
+    правится руками — потому и читается с диска, а не зашит в код."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "aliases.json")) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+ALIASES = load_aliases()
+
+
 def _close(q, name, cutoff=0.75):
     """Похоже ли слово из названия на запрос. Ловит то, чего не берёт словарь:
     «моти» против «мочі» — обе транслитерации японского, обе в ходу; плюс
@@ -96,19 +110,37 @@ def _close(q, name, cutoff=0.75):
                for w in name.split() if abs(len(w) - len(q)) <= 3)
 
 
+def _needles(word):
+    """Как ещё может выглядеть это слово в названии.
+
+    Кроме словаря — основа слова: «тунец» должен находить «з тунцем»,
+    а окончания в украинском и русском расходятся почти всегда."""
+    out = {word} | {ua for ru, ua in RU_UA.items() if ru in word}
+    if len(word) >= 5:
+        out.add(word[:len(word) - 2])
+    return out
+
+
 def find(query):
     """Ищем по артикулу или куску названия. Цена — из Cloud API, карточке не верим."""
     q = cappi.norm_full(query)
     menu = cappi.cloud_prices()
-    # Что искать в названии: сам запрос плюс украинские основы для русских слов.
-    needles = {q} | {ua for ru, ua in RU_UA.items() if ru in q}
-    hits = [(code, p) for code, p in menu.items()
-            if q == str(code).lower()
-            or any(n in cappi.norm_full(p["name"]) for n in needles)]
+
+    def matches(code, p):
+        if q == str(code).lower():
+            return True
+        name = cappi.norm_full(p["name"])
+        alias = " ".join(ALIASES.get(code, []))
+        # Каждое слово запроса должно найтись, иначе «сливочная креветка»
+        # вернёт все креветки подряд.
+        return all(any(n in name or n in alias for n in _needles(w))
+                   for w in q.split())
+
+    hits = [(c, p) for c, p in menu.items() if matches(c, p)]
     if not hits and len(q) >= 3:
         # Точного совпадения нет — пробуем приблизительно, но только тогда,
         # иначе точный запрос утонет в похожих.
-        hits = [(code, p) for code, p in menu.items()
+        hits = [(c, p) for c, p in menu.items()
                 if _close(q, cappi.norm_full(p["name"]))]
     return sorted(hits, key=lambda x: x[1]["name"])
 
