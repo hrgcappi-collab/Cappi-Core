@@ -13,6 +13,8 @@ unknown.log
 plan.json
 access.json
 stoplist.json
+special.json
+alerts_seen.json
 changes.log
 
 __pycache__/

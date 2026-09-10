@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 import access
 import cappi
+import promo
 import stoplist
 import report
 import webhook
@@ -55,7 +56,8 @@ _lock = threading.Lock()
     # Продажи — про то, что происходит с заказами прямо сейчас: что не
     # продаётся, что готовится, что отвалилось. Стоп-лист жил в «Ценах»,
     # но цена и наличие — разные вещи, и путать их не стоит.
-    "продажи": [["🛑 Стоп-лист"],
+    "продажи": [["🏷 Акционные", "⭐ Спецпредложение"],
+                ["🛑 Стоп-лист"],
                 ["🚚 В работе", "❌ Отмены"],
                 ["🗑 Списания"],
                 ["◀️ Назад"]],
@@ -870,6 +872,16 @@ def on_button(q):
             say(chat, f"❌ Не получилось: {e}")
         return
 
+    if act == "sx":                                   # убрать из спецпредложения
+        if not access.можно(chat, "цены"):
+            return say(chat, "Только оператор или админ.")
+        try:
+            ушло = promo.убрать_спец(arg)
+            say(chat, f"🗑 Убрано: <b>{ушло['название']}</b>")
+        except KeyError:
+            say(chat, "Такого в списке уже нет.")
+        return
+
     if act == "sd":                                   # смена за выбранный день
         return cmd_shift(chat, date.fromisoformat(arg))
 
@@ -993,6 +1005,8 @@ def on_button(q):
      lambda chat, m, txt: cmd_live(chat)),
     (r"^(отмен|сколько отмен|причины отмен)", lambda chat, m, txt: cmd_cancels(chat)),
     (r"^(списан|удален|что списал)", lambda chat, m, txt: cmd_deletions(chat)),
+    (r"^(акци|скидк|что по акци)", lambda chat, m, txt: cmd_promo(chat)),
+    (r"^(спец|спецпредлож)", lambda chat, m, txt: cmd_special(chat)),
 
     # цены
     (r"^(стоп|что в стопе|стоп.?лист)", lambda chat, m, txt: cmd_stoplist(chat)),
@@ -1224,6 +1238,8 @@ def on_message(m):
     elif cmd in ("/report", "/итоги"):
         d = date.fromisoformat(args[0]) if args else None
         cmd_report(chat, d, live=not args)
+    elif cmd == "/special":
+        cmd_special_add(chat, args)
     elif cmd == "/access":
         cmd_access_add(chat, args)
     elif cmd == "/plan":
