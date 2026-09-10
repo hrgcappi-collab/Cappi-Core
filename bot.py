@@ -4,12 +4,15 @@
 Запуск:  python3 bot.py
 Конфиг:  ~/.cappi/api.env  (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS)
 """
-import json, os, re, threading, time, traceback, urllib.parse, urllib.request
+import json, os, re, sys, threading, time, traceback, urllib.parse, urllib.request
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
 import cappi
 import report
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+START = time.time()
 
 CFG = cappi.cfg()
 TOKEN = CFG.get("TELEGRAM_BOT_TOKEN", "")
@@ -34,15 +37,30 @@ _confirm = {}               # токен → подготовленное изм
 _await = {}                 # чат → чего ждём от следующего сообщения
 _lock = threading.Lock()
 
-# Постоянная клавиатура снизу — основные действия под рукой.
-KB_MAIN = {
-    "keyboard": [
-        [{"text": "🔍 Найти позицию"}, {"text": "📊 Сверка витрин"}],
-        [{"text": "📈 Показатели"}, {"text": "⏳ На проверке"}],
-        [{"text": "❓ Помощь"}],
-    ],
-    "resize_keyboard": True,
+# Меню трёхуровневое: главный экран → модуль → действия. Плоский список из
+# семи кнопок читался как свалка; здесь каждый блок живёт отдельно, и добавить
+# в него кнопку можно, не трогая остальные.
+МЕНЮ = {
+    "главное": [["💰 Цены", "📈 Показатели"],
+                ["⚙️ Админка"]],
+    "цены": [["🔍 Найти позицию"],
+             ["📊 Сверка витрин", "⏳ На проверке"],
+             ["◀️ Назад"]],
+    "показатели": [["📈 Сейчас", "📅 За вчера"],
+                   ["🎯 План"],
+                   ["◀️ Назад"]],
+    "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
+                ["👥 Доступ", "🤖 Состояние бота"],
+                ["◀️ Назад"]],
 }
+
+_menu = {}          # чат → в каком модуле он сейчас
+
+
+def keyboard(chat):
+    return {"keyboard": [[{"text": b} for b in row]
+                         for row in МЕНЮ[_menu.get(chat, "главное")]],
+            "resize_keyboard": True}
 
 
 # ------------------------------------------------------------------ Telegram
@@ -55,12 +73,12 @@ def tg(method, **params):
         return json.loads(r.read())
 
 
-def say(chat, text, inline=None, keyboard=True):
+def say(chat, text, inline=None, keys=True):
     markup = None
     if inline:
         markup = {"inline_keyboard": inline}
-    elif keyboard:
-        markup = KB_MAIN
+    elif keys:
+        markup = keyboard(chat)
     return tg("sendMessage", chat_id=chat, text=text,
               parse_mode="HTML", reply_markup=markup)
 
@@ -331,6 +349,55 @@ def cmd_plan(chat, текст):
     say(chat, "\n".join(строки))
 
 
+def cmd_healthcheck(chat):
+    say(chat, "Проверяю все подключения…")
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(HERE, "healthcheck.py")],
+                       capture_output=True, text=True, timeout=300)
+    say(chat, "<pre>" + (r.stdout or r.stderr)[-3500:] + "</pre>")
+
+
+def cmd_audit(chat, n=15):
+    """Журнал смен цен — кто, что и когда менял."""
+    try:
+        строки = open(AUDIT).read().strip().splitlines()[-n:]
+    except FileNotFoundError:
+        строки = []
+    if not строки:
+        return say(chat, "Журнал пуст — цены через бота ещё не меняли.")
+    out = ["<b>Последние изменения цен</b>", ""]
+    for s in строки:
+        ч = s.split("\t")
+        out.append(f"<code>{ч[0][5:16]}</code> {ч[1]} · {ч[3] if len(ч)>3 else ''}"
+                   f"\n     {ч[2][:34] if len(ч)>2 else ''}"
+                   f"  {ч[5] if len(ч)>5 else ''}")
+    say(chat, "\n".join(out))
+
+
+def cmd_access(chat):
+    строки = ["<b>Доступ к боту</b>", ""]
+    for uid in sorted(ALLOWED):
+        строки.append(f"  <code>{uid}</code>" + ("  ← ты" if uid == chat else ""))
+    строки += ["", "<i>Список правится в TELEGRAM_ALLOWED_IDS "
+                   "(~/.cappi/api.env), затем перезапуск бота.</i>"]
+    say(chat, "\n".join(строки))
+
+
+def cmd_botstate(chat):
+    очередь = load_pending()
+    строки = [
+        "<b>Состояние бота</b>", "",
+        f"запущен: <code>{datetime.fromtimestamp(START):%d.%m %H:%M}</code>",
+        f"в очереди проверок: <b>{len(очередь)}</b>",
+        f"словарь написаний: <b>{sum(len(v) for v in ALIASES.values())}</b>",
+        f"итоги дня в <b>{REPORT_AT}</b>",
+        f"проверка витрин через <b>{CHECK_AFTER_MIN} мин</b> после смены цены",
+        f"порог опечатки: <b>{MAX_CHANGE_PCT}%</b>",
+        "", f"папка: <code>{HERE}</code>",
+    ]
+    say(chat, "\n".join(строки))
+
+
 # --------------------------------------------------------------- смена цены
 def _default_date():
     """Завтра — чтобы цена сменилась ночью, а не в рабочий день."""
@@ -554,12 +621,37 @@ def on_button(q):
 
 
 # ------------------------------------------------------------------ сообщения
+def открыть(chat, модуль, текст):
+    _menu[chat] = модуль
+    say(chat, текст)
+
+
 BUTTONS = {
+    # главное меню — вход в модули
+    "💰 цены": lambda chat: открыть(chat, "цены",
+        "<b>Цены</b>\nПоиск позиций, смена цены, сверка витрин."),
+    "📈 показатели": lambda chat: открыть(chat, "показатели",
+        "<b>Показатели</b>\nВыручка против плана, заказы, отмены, живые заказы."),
+    "⚙️ админка": lambda chat: открыть(chat, "админка",
+        "<b>Админка</b>\nПодключения, журнал, доступ, состояние."),
+    "◀️ назад": lambda chat: открыть(chat, "главное", "Главное меню"),
+
+    # модуль «Цены»
     "🔍 найти позицию": lambda chat: cmd_price(chat, ""),
     "📊 сверка витрин": cmd_check,
-    "📈 показатели": cmd_report,
     "⏳ на проверке": cmd_pending,
-    "❓ помощь": lambda chat: say(chat, HELP),
+
+    # модуль «Показатели»
+    "📈 сейчас": lambda chat: cmd_report(chat, None, live=True),
+    "📅 за вчера": lambda chat: cmd_report(chat, date.today() - timedelta(days=1),
+                                          live=False),
+    "🎯 план": lambda chat: cmd_plan(chat, ""),
+
+    # модуль «Админка»
+    "🔌 проверка связи": cmd_healthcheck,
+    "📜 журнал цен": cmd_audit,
+    "👥 доступ": cmd_access,
+    "🤖 состояние бота": cmd_botstate,
 }
 
 
@@ -571,7 +663,7 @@ def on_message(m):
     if uid not in ALLOWED:
         return say(chat, "Нет доступа.\n\nТвой id: <code>%d</code>\n"
                          "Впиши его в TELEGRAM_ALLOWED_IDS в ~/.cappi/api.env "
-                         "и перезапусти бота." % uid, keyboard=False)
+                         "и перезапусти бота." % uid, keys=False)
     who = m["from"].get("username") or str(uid)
 
     if text.lower() in BUTTONS:
@@ -593,6 +685,7 @@ def on_message(m):
     cmd, *args = text.split()
     cmd = cmd.lower().split("@")[0]
     if cmd in ("/start", "/help"):
+        _menu[chat] = "главное"
         say(chat, HELP)
     elif cmd == "/price":
         cmd_price(chat, " ".join(args))
