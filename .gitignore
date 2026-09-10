@@ -15,6 +15,7 @@ plan.json
 access.json
 stoplist.json
 special.json
+kpi.json
 alerts_seen.json
 changes.log
 
