@@ -1397,10 +1397,16 @@ def cmd_special_add(chat, args):
     if not args:
         return say(chat, "Формат: <code>/special 03275</code>\n"
                          "С пометкой: <code>/special 03275 новинка сентября</code>")
+    код = re.sub(r"\D", "", args[0])
     try:
-        v = promo.добавить_спец(re.sub(r"\D", "", args[0]), " ".join(args[1:]) or None)
-    except KeyError as e:
-        return say(chat, f"❌ {e}")
+        v = promo.добавить_спец(код, " ".join(args[1:]) or None)
+    except promo.НетТакогоАртикула:
+        _await[chat] = {"what": "special"}
+        соседи = sorted(c for c, _ in find(код[:3]) if c)[:6] if len(код) >= 3 else []
+        подсказка = ("\n<i>Рядом есть: " + ", ".join(соседи) + "</i>") if соседи else ""
+        return say(chat, f"❌ Артикула <b>{код}</b> в меню нет.{подсказка}\n\n"
+                         f"Пришли другой или найди позицию по названию "
+                         f"через «🔍 Найти позицию» — там будет её артикул.")
     say(chat, f"⭐ Добавлено в спецпредложение:\n<b>{v['название']}</b>"
               + (f"\n<i>{v['комментарий']}</i>" if v.get("комментарий") else ""))
 
