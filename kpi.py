@@ -80,30 +80,45 @@ def люди(значение=None):
 
 
 def кто(s, роль):
-    """ФИО. Сначала своё соответствие, потом поиск в Syrve."""
+    """ФИО. Сначала своё соответствие, потом поиск в Syrve.
+
+    Ищем в HQ, а не в ТП: кадровые правки делают там, а до ТП-базы они
+    доезжают обменом по расписанию. Из-за этого су-шеф Левітани полдня
+    числился поваром — роль ему уже поменяли, а мы смотрели в базу, куда
+    изменение ещё не пришло.
+
+    Роль проверяем и основную, и дополнительные: у су-шефа Лазаревой
+    основная — «Учетчик», а «Су-шеф» стоит второй.
+    """
     своё = люди().get(роль)
     if своё:
         return своё
     import xml.etree.ElementTree as ET
+    c = cappi.cfg()
     try:
-        emp = ET.fromstring(cappi._get(f"{s.host}/resto/api/employees?key={s.key}",
-                                       timeout=90))
-        roles = ET.fromstring(cappi._get(f"{s.host}/resto/api/employees/roles?key={s.key}",
-                                         timeout=60))
-        имена = {x.findtext("id"): x.findtext("name") for x in roles.iter("role")}
+        with cappi.Syrve(c["SYRVE_SERVER_URL"], c["SYRVE_API_LOGIN"],
+                         c["SYRVE_API_PASSWORD"]) as hq:
+            emp = ET.fromstring(cappi._get(
+                f"{hq.host}/resto/api/employees?key={hq.key}", timeout=90))
+            roles = ET.fromstring(cappi._get(
+                f"{hq.host}/resto/api/employees/roles?key={hq.key}", timeout=60))
     except Exception:
         return None
+    имена = {x.findtext("id"): x.findtext("name") for x in roles.iter("role")}
     искомое = "шеф-повар" if роль == "шеф" else "су-шеф"
-    if s is None:
-        return None
     for e in emp.iter("employee"):
         if e.findtext("deleted") == "true":
             continue
         имя = e.findtext("name") or ""
-        должность = (имена.get(e.findtext("mainRoleId") or "") or "").lower()
-        подходит = (искомое in должность or искомое in имя.lower())
+        свои = [имена.get(e.findtext("mainRoleId") or "") or ""]
+        свои += [имена.get(i) or "" for i in (e.findtext("rolesIds") or "").split(",")]
+        должности = " ".join(свои).lower()
+        подходит = искомое in должности or искомое in имя.lower()
         if роль != "шеф":
-            подходит = подходит and роль.lower()[:6] in имя.lower()
+            # «Левітана» и «Левитана» — одно место, разные буквы. В карточке
+            # Syrve пишут по-русски, у нас в отчётах по-украински, и без
+            # приведения алфавитов су-шеф просто не находится.
+            подходит = подходит and cappi.norm_full(роль)[:6] in cappi.norm_full(имя)
         if подходит:
             # «Загодиренко София (су-шеф, Лазарева)» — скобки лишние.
             return имя.split("(")[0].strip()
