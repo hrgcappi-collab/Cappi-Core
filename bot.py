@@ -442,6 +442,18 @@ def on_button(q):
     if act == "go":
         try:
             doc = do_change(c)
+        except cappi.PriceOrderExists as e:
+            other = date.fromisoformat(c["date"]) + timedelta(days=1)
+            say(chat,
+                f"⚠️ Не меняю: на {date.fromisoformat(e.date):%d.%m} по этой позиции "
+                f"уже есть приказ <b>№{e.number}</b>.\n\n"
+                f"Syrve не принимает второй приказ на ту же дату, а править "
+                f"существующий бесполезно — в Syrve цена изменится, а до сайта "
+                f"и Glovo не дойдёт.\n\n"
+                f"Поставь на другую дату: <code>/set {c['code']} {fmt(c['price'])} "
+                f"{other:%d.%m}</code> — или поправь приказ №{e.number} "
+                f"в Syrve руками.")
+            return
             say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён\n"
                       f"{c['name']}: <b>{fmt(c['old'])} → {fmt(c['price'])} ₴</b> "
                       f"с {date.fromisoformat(c['date']):%d.%m}\n\n"
@@ -504,8 +516,13 @@ def on_message(m):
         except ValueError:
             return say(chat, f"Не понял цену: <b>{args[1]}</b>")
         when = _default_date()
-        if len(args) > 2 and args[2].lower() in СЕГОДНЯ_СЛОВА:
-            when = date.today()
+        if len(args) > 2:
+            a = args[2].lower()
+            if a in СЕГОДНЯ_СЛОВА:
+                when = date.today()
+            elif re.fullmatch(r"\d{1,2}\.\d{1,2}", a):     # 12.09
+                d, m = (int(x) for x in a.split("."))
+                when = date(date.today().year, m, d)
         prepare(chat, args[0], price, when, who)
     elif text.startswith("/"):
         say(chat, "Не знаю такой команды. Жми кнопки снизу или /help")

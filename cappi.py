@@ -75,6 +75,14 @@ def norm_full(s):
 
 
 # ---------------------------------------------------------------- Syrve Server
+class PriceOrderExists(RuntimeError):
+    """На эту дату по этой позиции приказ уже есть — второй Syrve не примет."""
+
+    def __init__(self, number, date):
+        self.number, self.date = number, date
+        super().__init__(f"на {date} по этой позиции уже есть приказ №{number}")
+
+
 class Syrve:
     """Сессия к Syrve Server API. Занимает слот лицензии — всегда закрывать."""
 
@@ -122,30 +130,21 @@ class Syrve:
         return d["response"]
 
     def set_price(self, product_id, department_id, price, date):
-        """Меняет цену позиции на дату.
+        """Меняет цену позиции на дату — всегда новым приказом.
 
-        Syrve не даёт завести на одну дату два приказа по одному товару —
-        отвечает 409. Поэтому если приказ за этот день с этой позицией уже
-        есть, правим его, сохраняя остальные позиции нетронутыми.
+        Редактировать существующий приказ нельзя, хотя API это позволяет и
+        Syrve цену внутри меняет: наружу такая правка не уходит. 10.09.2026
+        отредактированный приказ так и не доехал до сайта за полтора часа,
+        тогда как новый доезжал за сорок минут. Выгрузка, судя по всему,
+        отдаёт изменения по документам и правку за изменение не считает.
+
+        Поэтому при столкновении — честный отказ. Тихо сделать то, что не
+        работает, хуже, чем сказать «не могу»: в кассе будет одна цена, на
+        витрине другая, и никто об этом не узнает.
         """
         for doc in self.orders(date, date):
             if any(i["productId"] == product_id for i in doc["items"]):
-                items = []
-                for i in doc["items"]:
-                    i = dict(i)
-                    i.pop("num", None)          # при редактировании не учитывается
-                    if i["productId"] == product_id:
-                        i["price"] = price
-                    items.append(i)
-                return self._send({
-                    "id": doc["id"],
-                    "dateIncoming": doc["dateIncoming"],
-                    "documentNumber": doc["documentNumber"],
-                    "status": doc["status"],
-                    "deletePreviousMenu": doc.get("deletePreviousMenu", False),
-                    "dateTo": doc.get("dateTo", "2500-01-01"),
-                    "items": items,
-                })
+                raise PriceOrderExists(doc["documentNumber"], date)
         return self.create_price_order(product_id, department_id, price, date)
 
     def create_price_order(self, product_id, department_id, price, date):
