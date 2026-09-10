@@ -5,6 +5,7 @@
 Конфиг:  ~/.cappi/api.env  (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS)
 """
 import json, os, re, threading, time, traceback, urllib.parse, urllib.request
+from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
 import cappi
@@ -87,16 +88,29 @@ RU_UA = {
 }
 
 
+def _close(q, name, cutoff=0.75):
+    """Похоже ли слово из названия на запрос. Ловит то, чего не берёт словарь:
+    «моти» против «мочі» — обе транслитерации японского, обе в ходу; плюс
+    обычные опечатки."""
+    return any(SequenceMatcher(None, q, w).ratio() >= cutoff
+               for w in name.split() if abs(len(w) - len(q)) <= 3)
+
+
 def find(query):
     """Ищем по артикулу или куску названия. Цена — из Cloud API, карточке не верим."""
     q = cappi.norm_full(query)
+    menu = cappi.cloud_prices()
     # Что искать в названии: сам запрос плюс украинские основы для русских слов.
     needles = {q} | {ua for ru, ua in RU_UA.items() if ru in q}
-    return sorted(
-        [(code, p) for code, p in cappi.cloud_prices().items()
-         if q == str(code).lower()
-         or any(n in cappi.norm_full(p["name"]) for n in needles)],
-        key=lambda x: x[1]["name"])
+    hits = [(code, p) for code, p in menu.items()
+            if q == str(code).lower()
+            or any(n in cappi.norm_full(p["name"]) for n in needles)]
+    if not hits and len(q) >= 3:
+        # Точного совпадения нет — пробуем приблизительно, но только тогда,
+        # иначе точный запрос утонет в похожих.
+        hits = [(code, p) for code, p in menu.items()
+                if _close(q, cappi.norm_full(p["name"]))]
+    return sorted(hits, key=lambda x: x[1]["name"])
 
 
 def where_shown(guid, name):
