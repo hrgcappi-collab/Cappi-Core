@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
 import cappi
+import report
 
 CFG = cappi.cfg()
 TOKEN = CFG.get("TELEGRAM_BOT_TOKEN", "")
@@ -19,6 +20,7 @@ STATE_DIR = os.path.expanduser("~/.cappi")
 PENDING = os.path.join(STATE_DIR, "pending.json")   # отложенные проверки витрин
 AUDIT = os.path.join(STATE_DIR, "changes.log")      # журнал изменений цен
 
+REPORT_AT = "22:00"         # когда присылать итоги дня
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
 MAX_CHANGE_PCT = 50         # скачок больше этого бот не проводит
 
@@ -36,7 +38,8 @@ _lock = threading.Lock()
 KB_MAIN = {
     "keyboard": [
         [{"text": "🔍 Найти позицию"}, {"text": "📊 Сверка витрин"}],
-        [{"text": "⏳ На проверке"}, {"text": "❓ Помощь"}],
+        [{"text": "📈 Показатели"}, {"text": "⏳ На проверке"}],
+        [{"text": "❓ Помощь"}],
     ],
     "resize_keyboard": True,
 }
@@ -179,6 +182,10 @@ HELP = f"""<b>Бот цен Cappi</b>
 <code>/price окрошка</code> — найти позицию
 <code>/set 03275 46</code> — сменить цену (вступит в силу ночью)
 <code>/set 03275 46 сейчас</code> — поменять прямо сейчас
+<code>/report</code> — показатели прямо сейчас
+<code>/report 2026-09-09</code> — за прошедший день
+<code>/plan 45000</code> — план выручки на сегодня
+<code>/plan месяц 1350000</code> — план на месяц
 <code>/check</code> — сверка витрин
 <code>/pending</code> — что стоит на проверке
 
@@ -191,7 +198,9 @@ HELP = f"""<b>Бот цен Cappi</b>
 позже. Через {CHECK_AFTER_MIN} минут бот сам проверит витрины и напишет,
 доехала ли цена.
 
-Скачок больше {MAX_CHANGE_PCT}% бот не проводит — защита от опечатки."""
+Скачок больше {MAX_CHANGE_PCT}% бот не проводит — защита от опечатки.
+
+Итоги дня приходят сами в {REPORT_AT}."""
 
 
 def screen_item(chat, code, p):
@@ -254,6 +263,44 @@ def cmd_pending(chat):
         f"<code>{i['code']}</code> {i['name'][:28]} → {fmt(i['price'])} ₴\n"
         f"     {'приказ принят?' if i.get('stage') == 'planned' else 'витрины'}"
         f" — {datetime.fromisoformat(i['due']):%d.%m %H:%M}" for i in items))
+
+
+def cmd_report(chat, day=None, live=True):
+    say(chat, "Считаю показатели…")
+    say(chat, report.render(report.collect(day), live=live))
+
+
+def cmd_plan(chat, args):
+    """/plan 45000 — на сегодня; /plan месяц 1350000 — на текущий месяц."""
+    p = report.load_plan()
+    if not args:
+        today = date.today()
+        сумма, откуда = report.plan_for(today)
+        строки = [f"План на {today:%d.%m}: "
+                  + (f"<b>{report.money(сумма)} ₴</b> <i>({откуда})</i>"
+                     if сумма else "<i>не задан</i>")]
+        if p.get("months"):
+            строки.append("")
+            for m, v in sorted(p["months"].items()):
+                строки.append(f"  {m}: {report.money(v)} ₴")
+        строки += ["", "Поставить:", "<code>/plan 45000</code> — на сегодня",
+                   "<code>/plan месяц 1350000</code> — на месяц, разделится по дням"]
+        return say(chat, "\n".join(строки))
+
+    месяц = args[0].lower() in ("месяц", "month")
+    сырое = args[1] if месяц else args[0]
+    try:
+        сумма = float(re.sub(r"[\s ]", "", сырое).replace(",", "."))
+    except (ValueError, IndexError):
+        return say(chat, f"Не понял сумму: <b>{сырое}</b>")
+    if месяц:
+        p.setdefault("months", {})[date.today().strftime("%Y-%m")] = сумма
+        report.save_plan(p)
+        return say(chat, f"План на {date.today():%B %Y}: <b>{report.money(сумма)} ₴</b>\n"
+                         f"По дням разойдётся сам.")
+    p.setdefault("days", {})[date.today().isoformat()] = сумма
+    report.save_plan(p)
+    say(chat, f"План на {date.today():%d.%m}: <b>{report.money(сумма)} ₴</b>")
 
 
 # --------------------------------------------------------------- смена цены
@@ -373,10 +420,26 @@ def _check_showcase(it):
     return None
 
 
+def _send_daily(sent):
+    """Итоги дня в REPORT_AT. sent помнит дату, чтобы не отправить дважды."""
+    now = datetime.now()
+    if now.strftime("%H:%M") < REPORT_AT or sent.get("day") == now.date():
+        return
+    sent["day"] = now.date()
+    текст = report.render(report.collect(), live=False)
+    for uid in ALLOWED:
+        try:
+            say(uid, текст)
+        except Exception:
+            traceback.print_exc()
+
+
 def watcher():
-    """Догоняет отложенные проверки: сперва что приказ принят, потом витрины."""
+    """Догоняет отложенные проверки и присылает итоги дня."""
+    sent = {}
     while True:
         try:
+            _send_daily(sent)
             keep = []
             for it in load_pending():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
@@ -466,6 +529,7 @@ def on_button(q):
 BUTTONS = {
     "🔍 найти позицию": lambda chat: cmd_price(chat, ""),
     "📊 сверка витрин": cmd_check,
+    "📈 показатели": cmd_report,
     "⏳ на проверке": cmd_pending,
     "❓ помощь": lambda chat: say(chat, HELP),
 }
@@ -508,6 +572,11 @@ def on_message(m):
         cmd_check(chat)
     elif cmd == "/pending":
         cmd_pending(chat)
+    elif cmd in ("/report", "/итоги"):
+        d = date.fromisoformat(args[0]) if args else None
+        cmd_report(chat, d, live=not args)
+    elif cmd == "/plan":
+        cmd_plan(chat, args)
     elif cmd == "/set":
         if len(args) < 2:
             return say(chat, "Формат: <code>/set &lt;артикул&gt; &lt;цена&gt; [завтра]</code>")
