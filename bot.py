@@ -50,6 +50,7 @@ _lock = threading.Lock()
              ["📊 Сверка витрин", "⏳ На проверке"],
              ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
+                   ["📅 Выбрать день"],
                    ["🎯 План", "🚧 Зоны"],
                    ["😠 Жалобы"],
                    ["◀️ Назад"]],
@@ -696,6 +697,13 @@ def on_button(q):
     tg("answerCallbackQuery", callback_query_id=q["id"])
     who = q["from"].get("username") or str(q["from"]["id"])
 
+    if act == "rd":                                   # отчёт за выбранный день
+        d = date.fromisoformat(arg)
+        return cmd_report(chat, d, live=(d == date.today()))
+
+    if act == "rp":                                   # листаем календарь назад
+        return cmd_pick_day(chat, int(arg))
+
     if act == "ac":                                   # карточка человека
         return экран_человека(chat, arg)
 
@@ -793,6 +801,10 @@ def on_button(q):
         chat, date.today() - timedelta(days=1), live=False)),
     (r"^(за )?(позавчера)", lambda chat, m, txt: cmd_report(
         chat, date.today() - timedelta(days=2), live=False)),
+    (r"^(выбер|выбрать день|календар|за день|какой день)",
+     lambda chat, m, txt: cmd_pick_day(chat)),
+    (r"^(за )?(\d+) дн", lambda chat, m, txt: cmd_report(
+        chat, date.today() - timedelta(days=int(m.group(2))), live=False)),
     (r"^(за )?(\d{1,2})\.(\d{1,2})(\.(\d{4}))?$",
      lambda chat, m, txt: cmd_report(
          chat, date(int(m.group(5) or date.today().year),
@@ -834,6 +846,26 @@ def команда_цены(chat, что, цена):
             [{"text": f"{fmt(p['price'])} ₴ · {p['name'][:32]}",
               "callback_data": f"ed:{code}"}] for code, p in hits[:12]])
     return prepare(chat, hits[0][0], float(цена), _default_date(), "текст")
+
+
+ДНИ_НЕДЕЛИ = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def cmd_pick_day(chat, сдвиг=0):
+    """Выбор дня для отчёта. Кнопками, потому что дату руками набирают с
+    опечатками, а формат каждый раз вспоминают заново."""
+    кнопки, ряд = [], []
+    for i in range(сдвиг, сдвиг + 14):
+        d = date.today() - timedelta(days=i)
+        подпись = ("сегодня" if i == 0 else "вчера" if i == 1
+                   else f"{d:%d.%m} {ДНИ_НЕДЕЛИ[d.weekday()]}")
+        ряд.append({"text": подпись, "callback_data": f"rd:{d.isoformat()}"})
+        if len(ряд) == 3:
+            кнопки.append(ряд); ряд = []
+    if ряд:
+        кнопки.append(ряд)
+    кнопки.append([{"text": "← ещё раньше", "callback_data": f"rp:{сдвиг + 14}"}])
+    say(chat, "За какой день?", inline=кнопки)
 
 
 def cmd_complaints(chat, day=None):
@@ -954,6 +986,7 @@ BUTTONS = {
     "📈 сейчас": lambda chat: cmd_report(chat, None, live=True),
     "📅 за вчера": lambda chat: cmd_report(chat, date.today() - timedelta(days=1),
                                           live=False),
+    "📅 выбрать день": cmd_pick_day,
     "🎯 план": lambda chat: cmd_plan(chat, ""),
     "🚧 зоны": cmd_zones,
     "😠 жалобы": cmd_complaints,
