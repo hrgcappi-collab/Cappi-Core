@@ -40,6 +40,14 @@ PLAN_FILE = os.path.expanduser("~/.cappi/plan.json")
 
 ДНИ = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
+# Категории жалоб Loopa отдаёт кодами — читают их люди.
+ПОВОДЫ = {
+    "kitchen": "кухня", "delivery": "доставка", "packing": "упаковка",
+    "courier": "курьер", "call_center": "кол-центр", "service": "сервис",
+    "tech": "техника", "glovo": "Glovo", "guest": "гость",
+    "other": "прочее", "podiaka-pozytyv": "благодарность",
+}
+
 # Статусы доставки, которые означают «заказ ещё в работе».
 В_РАБОТЕ = ("Unconfirmed", "WaitCooking", "ReadyForCooking", "CookingStarted",
             "CookingCompleted", "Waiting", "OnWay")
@@ -283,6 +291,42 @@ def removals(s, day):
             for r in rows if r.get("RemovalType")}
 
 
+# ------------------------------------------------------------------- жалобы
+# Жалоба — это отзыв с негативной тональностью. Loopa размечает тональность
+# сама, и брать все отзывы подряд бессмысленно: за десять дней их 258, из
+# них негативных 19. Показатель «сколько отзывов» ни о чём не говорит,
+# показатель «сколько недовольных» — говорит.
+
+def _loopa(**params):
+    c = cappi.cfg()
+    if not c.get("LOOPA_TOKEN"):
+        return None
+    q = "&".join(f"{k}={v}" for k, v in params.items())
+    return json.loads(cappi._get(
+        f"{c['LOOPA_URL'].rstrip('/')}/metrics/reviews?{q}",
+        {"Authorization": f"Bearer {c['LOOPA_TOKEN']}"}, timeout=40))
+
+
+def complaints(day, разрез="category"):
+    """Жалобы за день: сколько и по каким поводам."""
+    д = day.isoformat()
+    общее = _loopa(**{"from": д, "to": д, "tone": "negative"})
+    if общее is None:
+        return None
+    по = _loopa(**{"from": д, "to": д, "tone": "negative", "group_by": разрез}) or {}
+    точки = _loopa(**{"from": д, "to": д, "tone": "negative", "group_by": "branch"}) or {}
+    срочность = _loopa(**{"from": д, "to": д, "tone": "negative",
+                          "group_by": "urgency"}) or {}
+    всего = _loopa(**{"from": д, "to": д}) or {}
+    return {
+        "жалоб": общее.get("total", 0),
+        "отзывов": всего.get("total", 0),
+        "по_поводам": {g["key"]: g["count"] for g in по.get("groups", []) if g["key"]},
+        "по_точкам": {g["key"]: g["count"] for g in точки.get("groups", []) if g["key"]},
+        "срочность": {g["key"]: g["count"] for g in срочность.get("groups", []) if g["key"]},
+    }
+
+
 # --------------------------------------------------------------- живые заказы
 def live_orders(day=None):
     """Статусы заказов доставки за день — то, что происходит прямо сейчас."""
@@ -309,6 +353,10 @@ def collect(day=None):
         d = {"день": day, "продажи": sales(s, day), "точки": sales_by_point(s, day),
              "отмены": cancels(s, day), "удаления": removals(s, day),
              "месяц_факт": month_to_date(s, day)}
+    try:
+        d["жалобы"] = complaints(day)
+    except Exception as e:
+        d["жалобы"] = {"ошибка": str(e)[:100]}
     try:
         d["живые"] = live_orders(day)
     except Exception as e:
@@ -377,6 +425,21 @@ def render(d, live=False):
         строки += ["", "🗑 Удаления блюд:"]
         for причина, n in sorted(d["удаления"].items(), key=lambda x: -x[1]):
             строки.append(f"    {причина} — {n}")
+
+    ж = d.get("жалобы") or {}
+    if "ошибка" in ж:
+        строки += ["", f"⚠️ Жалобы недоступны: {ж['ошибка']}"]
+    elif ж:
+        доля = f" из {ж['отзывов']} отзывов" if ж.get("отзывов") else ""
+        строки += ["", f"😠 Жалоб: <b>{ж['жалоб']}</b>{доля}"]
+        крит = ж["срочность"].get("critical", 0) + ж["срочность"].get("high", 0)
+        if крит:
+            строки.append(f"    <b>срочных: {крит}</b>")
+        for повод, n in sorted(ж["по_поводам"].items(), key=lambda x: -x[1]):
+            строки.append(f"    {ПОВОДЫ.get(повод, повод)} — {n}")
+        if len(ж["по_точкам"]) > 1:
+            строки.append("    " + " · ".join(
+                f"{т} {n}" for т, n in sorted(ж["по_точкам"].items(), key=lambda x: -x[1])))
 
     з = d.get("зоны") or {}
     if з.get("закрытий"):

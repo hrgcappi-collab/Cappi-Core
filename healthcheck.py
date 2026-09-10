@@ -12,7 +12,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from datetime import date
+
 import cappi
+import report as report_mod
 
 CFG = cappi.cfg()
 OK, FAIL, SKIP = "✅", "❌", "⏭"
@@ -138,6 +141,16 @@ def glovo():
     return f"Glovo · разобрано позиций: {len(p)}"
 
 
+def loopa():
+    need("LOOPA_URL", "LOOPA_TOKEN")
+    from datetime import timedelta
+    ж = report_mod.complaints(date.today())
+    неделя = report_mod._loopa(**{"from": (date.today() - timedelta(days=6)).isoformat(),
+                                  "to": date.today().isoformat(), "tone": "negative"})
+    return (f"жалоб сегодня: {ж['жалоб']} из {ж['отзывов']} отзывов · "
+            f"за неделю: {неделя.get('total', 0)}")
+
+
 def jamshut():
     need("JAMSHUT_URL", "JAMSHUT_TOKEN")
     import webhook
@@ -192,6 +205,7 @@ CHECKS = [
     ("Syrve Cloud — стоп-листы", stop_lists),
     ("Сайт cappi.ua", site),
     ("Glovo", glovo),
+    ("Loopa (жалобы)", loopa),
     ("Джамшут (зоны)", jamshut),
     ("Cappi Admin", cappi_admin),
     ("Telegram-бот", telegram),

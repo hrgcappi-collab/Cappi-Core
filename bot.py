@@ -50,6 +50,7 @@ _lock = threading.Lock()
              ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
                    ["🎯 План", "🚧 Зоны"],
+                   ["😠 Жалобы"],
                    ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
                 ["🗣 Непонятые", "👥 Доступ"],
@@ -729,8 +730,7 @@ def on_button(q):
     (r"^(помощ|что умеешь|команды|help)", lambda chat, m, txt: say(chat, HELP)),
 
     # то, чего ещё нет — честно говорим, а не молчим
-    (r"^(жалоб|негатив|отзыв)", lambda chat, m, txt: say(
-        chat, "Жалобы пока не подключены — жду доступ к Loopa.")),
+    (r"^(жалоб|негатив|отзыв)", lambda chat, m, txt: cmd_complaints(chat)),
     (r"^(зон|закрыт)", lambda chat, m, txt: cmd_zones(chat)),
 ]
 
@@ -745,6 +745,30 @@ def команда_цены(chat, что, цена):
             [{"text": f"{fmt(p['price'])} ₴ · {p['name'][:32]}",
               "callback_data": f"ed:{code}"}] for code, p in hits[:12]])
     return prepare(chat, hits[0][0], float(цена), _default_date(), "текст")
+
+
+def cmd_complaints(chat, day=None):
+    day = day or date.today()
+    ж = report.complaints(day)
+    if ж is None:
+        return say(chat, "Loopa не настроена — нет LOOPA_TOKEN.")
+    if not ж["жалоб"]:
+        return say(chat, f"За {day:%d.%m} жалоб нет."
+                         + (f" Отзывов всего {ж['отзывов']}." if ж["отзывов"] else ""))
+    строки = [f"😠 <b>Жалоб за {day:%d.%m}: {ж['жалоб']}</b>"
+              + (f" из {ж['отзывов']} отзывов" if ж["отзывов"] else ""), ""]
+    if ж["срочность"]:
+        строки.append("по срочности: " + ", ".join(
+            f"{s} {n}" for s, n in sorted(ж["срочность"].items(), key=lambda x: -x[1])))
+    if ж["по_поводам"]:
+        строки += ["", "<b>Поводы</b>"]
+        строки += [f"    {report.ПОВОДЫ.get(p, p)} — {n}"
+                   for p, n in sorted(ж["по_поводам"].items(), key=lambda x: -x[1])]
+    if ж["по_точкам"]:
+        строки += ["", "<b>По точкам</b>"]
+        строки += [f"    {т} — {n}"
+                   for т, n in sorted(ж["по_точкам"].items(), key=lambda x: -x[1])]
+    say(chat, "\n".join(строки))
 
 
 def cmd_zones(chat, day=None):
@@ -843,6 +867,7 @@ BUTTONS = {
                                           live=False),
     "🎯 план": lambda chat: cmd_plan(chat, ""),
     "🚧 зоны": cmd_zones,
+    "😠 жалобы": cmd_complaints,
 
     # модуль «Админка»
     "🔌 проверка связи": cmd_healthcheck,
