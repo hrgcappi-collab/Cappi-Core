@@ -10,6 +10,7 @@ menu.json
 pending.json
 zone_events.jsonl
 unknown.log
+denied.log
 plan.json
 access.json
 stoplist.json

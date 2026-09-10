@@ -29,6 +29,7 @@ PENDING = os.path.join(STATE_DIR, "pending.json")   # отложенные пр�
 AUDIT = os.path.join(STATE_DIR, "changes.log")      # журнал изменений цен
 UNKNOWN = os.path.join(STATE_DIR, "unknown.log")    # что бот не понял — на ревизию
 ALERTS = os.path.join(STATE_DIR, "alerts_seen.json")  # о чём уже сообщали
+DENIED = os.path.join(STATE_DIR, "denied.log")      # кто стучался без доступа
 
 REPORT_AT = "22:00"         # когда присылать итоги дня
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
@@ -81,7 +82,8 @@ _lock = threading.Lock()
                 ["🩺 Здоровье"],
                 ["◀️ Назад"]],
     "админка": [["🔌 Проверка связи", "📜 Журнал цен"],
-                ["🗣 Непонятые", "👥 Доступ"],
+                ["🗣 Непонятые", "🔐 Отказы"],
+                ["👥 Доступ"],
                 ["🤖 Состояние бота"],
                 ["◀️ Назад"]],
 }
@@ -1289,6 +1291,62 @@ def cmd_cancels(chat):
     say(chat, "\n".join(строки))
 
 
+def _отказ(m, текст):
+    """Кто стучался без доступа.
+
+    Бот отвечает «нет доступа» и забывал об этом. Между «человек ошибся
+    ботом» и «кто-то методично подбирается к смене цен» разница только в
+    том, повторяется ли попытка, — а без записи этого не увидеть.
+    Первую попытку от нового человека показываем админам сразу.
+    """
+    f = m.get("from") or {}
+    uid = f.get("id")
+    кто = "@" + f["username"] if f.get("username") else (f.get("first_name") or "—")
+    новый = True
+    try:
+        новый = not any(f"\t{uid}\t" in s for s in open(DENIED))
+    except FileNotFoundError:
+        pass
+    with open(DENIED, "a") as файл:
+        файл.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{uid}\t{кто}\t{текст[:120]}\n")
+    if новый:
+        for admin in (int(u) for u, v in access.все().items()
+                      if v.get("роль") == "админ"):
+            try:
+                say(admin, f"🔐 <b>Попытка входа без доступа</b>\n"
+                           f"{кто} · <code>{uid}</code>\n"
+                           f"написал: <i>{текст[:80]}</i>\n\n"
+                           f"Выдать доступ — пришли <code>{uid}</code>.")
+            except Exception:
+                pass
+
+
+def cmd_denied(chat, n=30):
+    """Журнал отказов — кто пробовал войти."""
+    if not access.можно(chat, "админка"):
+        return say(chat, "Только админ.")
+    try:
+        строки = open(DENIED).read().strip().splitlines()
+    except FileNotFoundError:
+        строки = []
+    if not строки:
+        return say(chat, "🔐 Попыток входа без доступа не было.")
+    from collections import Counter
+    люди = Counter(s.split("\t")[1] for s in строки if "\t" in s)
+    out = [f"🔐 <b>Попытки входа без доступа: {len(строки)}</b>",
+           f"разных людей: {len(люди)}", ""]
+    for s in строки[-n:]:
+        ч = s.split("\t")
+        if len(ч) >= 4:
+            out.append(f"  <code>{ч[0][5:]}</code> {ч[2]} · <code>{ч[1]}</code>"
+                       f"\n      <i>{ч[3][:60]}</i>")
+    повторные = [(u, c) for u, c in люди.most_common() if c > 2]
+    if повторные:
+        out += ["", "<b>Стучались настойчиво</b>"]
+        out += [f"  <code>{u}</code> — {c} раз" for u, c in повторные]
+    say(chat, "\n".join(out))
+
+
 def не_понял(chat, текст, кто):
     """Записываем непонятое — это материал для ревизии, а не мусор."""
     with open(UNKNOWN, "a") as f:
@@ -1677,6 +1735,7 @@ BUTTONS = {
     "📜 журнал цен": cmd_audit,
     "👥 доступ": cmd_access,
     "🗣 непонятые": cmd_unknown,
+    "🔐 отказы": cmd_denied,
     "🤖 состояние бота": cmd_botstate,
 }
 
@@ -1700,6 +1759,7 @@ def on_message(m):
         return
     uid = m["from"]["id"]
     if not access.есть_доступ(uid):
+        _отказ(m, text)
         return say(chat, "Нет доступа.\n\nТвой id: <code>%d</code>\n"
                          "<i>Покажи его тому, у кого роль «админ» — "
                          "он выдаст доступ из бота.</i>" % uid, keys=False)
