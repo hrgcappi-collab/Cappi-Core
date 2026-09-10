@@ -34,6 +34,9 @@ PLAN_FILE = os.path.expanduser("~/.cappi/plan.json")
 # поэтому держим соответствие явно, а не угадываем по вхождению подстроки.
 ТОЧКИ = {"Зал Лазарева": "Лазарева", "Зал Левитана": "Левитана"}
 
+# Махачкалинскую в плане не выделяют — её выручка идёт в Лазареву.
+СЛИВАТЬ = {"Зал Махачкалинская": "Зал Лазарева"}
+
 ДНИ = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 # Статусы доставки, которые означают «заказ ещё в работе».
@@ -79,8 +82,13 @@ def parse_plan(текст):
                 число = float(re.sub(r"[^\d.,]", "", части[-1]).replace(",", "."))
             except ValueError:
                 число = None
+        # Дата вида 07.09.2026 — план на конкретный день, он точнее дня недели.
+        дата = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", части[0].strip())
         день = next((d for d in ДНИ if имя.startswith(d)), None)
-        if день and число is not None and точка:
+        if дата and число is not None and точка:
+            д, м, г = (int(x) for x in дата.groups())
+            план[точка][date(г, м, д).isoformat()] = число
+        elif день and число is not None and точка:
             план[точка][день] = число
         elif имя.startswith("недел") and число is not None and точка:
             факт = sum(план[точка].values())
@@ -97,18 +105,23 @@ def parse_plan(текст):
 
 
 def plan_for(day):
-    """План на день: сумма по точкам плюс разбивка. Точечный план на дату
-    перебивает недельный — им пользуются, когда день выбивается из обычного."""
+    """План на день: сумма по точкам плюс разбивка.
+
+    Порядок важен. План на конкретную дату перебивает план по дню недели:
+    даты присылают на неделю вперёд с учётом акций и праздников, а день
+    недели — это усреднённый шаблон.
+    """
     p = load_plan()
     d = day.isoformat()
-    if d in p.get("days", {}):
-        сумма = p["days"][d]
-        return сумма, {}, "на день"
-    недельный = p.get("weekly", {})
-    if недельный:
+    план = p.get("weekly", {})
+    по_датам = {т: v[d] for т, v in план.items() if d in v}
+    if по_датам:
+        return sum(по_датам.values()), по_датам, "на дату"
+    if план:
         день = ДНИ[day.weekday()]
-        по_точкам = {т: v.get(день, 0) for т, v in недельный.items()}
-        return sum(по_точкам.values()), по_точкам, f"недельный, {день}"
+        по_точкам = {т: v[день] for т, v in план.items() if день in v}
+        if по_точкам:
+            return sum(по_точкам.values()), по_точкам, f"по дню недели ({день})"
     month = p.get("months", {}).get(day.strftime("%Y-%m"))
     if month:
         в_месяце = (date(day.year + day.month // 12, day.month % 12 + 1, 1)
@@ -163,9 +176,16 @@ def sales_by_point(s, day):
     """Выручка и чеки по точкам — план ведут именно так."""
     rows = _olap(s, day, ["RestaurantSection"],
                  ["DishDiscountSumInt", "UniqOrderId"])
-    return {r.get("RestaurantSection"): {"сумма": r.get("DishDiscountSumInt", 0) or 0,
-                                         "чеки": r.get("UniqOrderId", 0) or 0}
-            for r in rows if r.get("RestaurantSection")}
+    out = {}
+    for r in rows:
+        имя = r.get("RestaurantSection")
+        if not имя:
+            continue
+        имя = СЛИВАТЬ.get(имя, имя)          # Махачкалинская → Лазарева
+        цель = out.setdefault(имя, {"сумма": 0, "чеки": 0})
+        цель["сумма"] += r.get("DishDiscountSumInt", 0) or 0
+        цель["чеки"] += r.get("UniqOrderId", 0) or 0
+    return out
 
 
 def cancels(s, day):
