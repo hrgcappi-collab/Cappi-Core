@@ -270,37 +270,65 @@ def cmd_report(chat, day=None, live=True):
     say(chat, report.render(report.collect(day), live=live))
 
 
-def cmd_plan(chat, args):
-    """/plan 45000 — на сегодня; /plan месяц 1350000 — на текущий месяц."""
+def cmd_plan(chat, текст):
+    """Показывает план или принимает его таблицей — в том виде, как ведут."""
     p = report.load_plan()
-    if not args:
+    args = текст.split()
+
+    if not текст.strip():
         today = date.today()
-        сумма, откуда = report.plan_for(today)
-        строки = [f"План на {today:%d.%m}: "
-                  + (f"<b>{report.money(сумма)} ₴</b> <i>({откуда})</i>"
+        сумма, по_точкам, откуда = report.plan_for(today)
+        строки = [f"<b>План на {today:%d.%m}</b> "
+                  + (f"— <b>{report.money(сумма)} ₴</b> <i>({откуда})</i>"
                      if сумма else "<i>не задан</i>")]
-        if p.get("months"):
-            строки.append("")
-            for m, v in sorted(p["months"].items()):
-                строки.append(f"  {m}: {report.money(v)} ₴")
-        строки += ["", "Поставить:", "<code>/plan 45000</code> — на сегодня",
-                   "<code>/plan месяц 1350000</code> — на месяц, разделится по дням"]
+        for точка, v in sorted(по_точкам.items(), key=lambda x: -x[1]):
+            строки.append(f"    {report.ТОЧКИ.get(точка, точка):<10} {report.money(v):>9} ₴")
+        if p.get("weekly"):
+            строки += ["", "<b>Недельный план</b>"]
+            for точка, дни in p["weekly"].items():
+                за_неделю = sum(дни.values())
+                строки.append(f"  {report.ТОЧКИ.get(точка, точка)} — "
+                              f"{report.money(за_неделю)} ₴/нед")
+                строки.append("    " + "  ".join(
+                    f"{d} {report.money(дни.get(d, 0))}" for d in report.ДНИ))
+        строки += ["", "Поставить — пришли таблицу как есть:",
+                   "<code>Лазарева\nПн  58420\nВт  58420\n…</code>",
+                   "", "Или разово: <code>/plan 45000</code> — на сегодня."]
         return say(chat, "\n".join(строки))
 
-    месяц = args[0].lower() in ("месяц", "month")
-    сырое = args[1] if месяц else args[0]
-    try:
-        сумма = float(re.sub(r"[\s ]", "", сырое).replace(",", "."))
-    except (ValueError, IndexError):
-        return say(chat, f"Не понял сумму: <b>{сырое}</b>")
-    if месяц:
-        p.setdefault("months", {})[date.today().strftime("%Y-%m")] = сумма
+    # Одно число — точечный план на сегодня.
+    if len(args) == 1:
+        try:
+            сумма = float(re.sub(r"[^\d.,]", "", args[0]).replace(",", "."))
+        except ValueError:
+            return say(chat, f"Не понял сумму: <b>{args[0]}</b>")
+        p.setdefault("days", {})[date.today().isoformat()] = сумма
         report.save_plan(p)
-        return say(chat, f"План на {date.today():%B %Y}: <b>{report.money(сумма)} ₴</b>\n"
-                         f"По дням разойдётся сам.")
-    p.setdefault("days", {})[date.today().isoformat()] = сумма
+        return say(chat, f"План на {date.today():%d.%m}: "
+                         f"<b>{report.money(сумма)} ₴</b>\n"
+                         f"<i>Он перебивает недельный только на сегодня.</i>")
+
+    план, ошибки = report.parse_plan(текст)
+    заполненные = {т: д for т, д in план.items() if д}
+    if not заполненные:
+        return say(chat, "Не нашёл в тексте дней недели с суммами.\n"
+                         "Ожидаю строку с названием точки, а под ней "
+                         "<code>Пн  58420</code> и так далее.")
+    p["weekly"] = заполненные
     report.save_plan(p)
-    say(chat, f"План на {date.today():%d.%m}: <b>{report.money(сумма)} ₴</b>")
+    строки = ["✅ <b>Недельный план принят</b>", ""]
+    for точка, дни in заполненные.items():
+        строки.append(f"<b>{report.ТОЧКИ.get(точка, точка)}</b> — "
+                      f"{report.money(sum(дни.values()))} ₴/нед")
+        строки.append("    " + "  ".join(
+            f"{d} {report.money(дни.get(d, 0))}" for d in report.ДНИ))
+    итого = sum(sum(д.values()) for д in заполненные.values())
+    строки += ["", f"Итого <b>{report.money(итого)} ₴</b> в неделю"]
+    if ошибки:
+        строки += ["", "⚠️ <b>Суммы не сходятся с итогами в таблице:</b>"]
+        строки += [f"    {o}" for o in ошибки]
+        строки.append("<i>План записал по дням — проверь исходную таблицу.</i>")
+    say(chat, "\n".join(строки))
 
 
 # --------------------------------------------------------------- смена цены
@@ -576,7 +604,7 @@ def on_message(m):
         d = date.fromisoformat(args[0]) if args else None
         cmd_report(chat, d, live=not args)
     elif cmd == "/plan":
-        cmd_plan(chat, args)
+        cmd_plan(chat, text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else "")
     elif cmd == "/set":
         if len(args) < 2:
             return say(chat, "Формат: <code>/set &lt;артикул&gt; &lt;цена&gt; [завтра]</code>")
@@ -595,6 +623,10 @@ def on_message(m):
         prepare(chat, args[0], price, when, who)
     elif text.startswith("/"):
         say(chat, "Не знаю такой команды. Жми кнопки снизу или /help")
+    elif sum(1 for l in text.splitlines()
+             if re.match(r"\s*(пн|вт|ср|чт|пт|сб|вс)\b", l.strip().lower())) >= 3:
+        # Вставили таблицу плана — понятно и без команды.
+        cmd_plan(chat, text)
     else:
         # Любой текст — это поиск. Так естественнее, чем отчитывать за команду.
         cmd_price(chat, text)
