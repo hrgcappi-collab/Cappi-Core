@@ -43,6 +43,24 @@ PLAN_FILE = os.path.expanduser("~/.cappi/plan.json")
 В_РАБОТЕ = ("Unconfirmed", "WaitCooking", "ReadyForCooking", "CookingStarted",
             "CookingCompleted", "Waiting", "OnWay")
 
+# Syrve отдаёт статусы по-английски, читают их люди — переводим.
+СТАТУСЫ = {
+    "Unconfirmed": "не подтверждён",
+    "WaitCooking": "ждёт кухню",
+    "ReadyForCooking": "готов к приготовлению",
+    "CookingStarted": "готовится",
+    "CookingCompleted": "приготовлен",
+    "Waiting": "ждёт курьера",
+    "OnWay": "в пути",
+    "Delivered": "доставлен",
+    "Closed": "закрыт",
+    "Cancelled": "отменён",
+}
+
+
+def статус(код):
+    return СТАТУСЫ.get(код, код)
+
 
 # ------------------------------------------------------------------- план
 def load_plan():
@@ -364,8 +382,8 @@ def render(d, live=False):
     elif ж:
         строки += ["", f"🚚 Заказов в работе: <b>{ж['в_работе']}</b> из {ж['всего']}"]
         for st, n in sorted(ж["статусы"].items(), key=lambda x: -x[1]):
-            если_в_работе = " ←" if st in В_РАБОТЕ else ""
-            строки.append(f"    {st} — {n}{если_в_работе}")
+            метка = " ←" if st in В_РАБОТЕ else ""
+            строки.append(f"    {статус(st)} — {n}{метка}")
 
     строки += ["", "<i>Учётный день: ночная смена попадёт в этот же день, "
                    "поэтому вечерние цифры ещё не итоговые.</i>"]

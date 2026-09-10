@@ -703,7 +703,8 @@ def cmd_live(chat):
     ж = report.live_orders()
     строки = [f"🚚 <b>В работе: {ж['в_работе']}</b> из {ж['всего']} за сегодня", ""]
     for st, n in sorted(ж["статусы"].items(), key=lambda x: -x[1]):
-        строки.append(f"    {st} — {n}" + ("  ←" if st in report.В_РАБОТЕ else ""))
+        строки.append(f"    {report.статус(st)} — {n}"
+                      + ("  ←" if st in report.В_РАБОТЕ else ""))
     say(chat, "\n".join(строки))
 
 
