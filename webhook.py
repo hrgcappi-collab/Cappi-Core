@@ -68,11 +68,17 @@ def save(payload):
     with _lock:
         if fp in _seen:
             return False
-        _seen.add(fp)
+        # Помечаем виденным только после успешной записи. Иначе сбой диска
+        # означал бы, что событие потеряно и повторную доставку мы тоже
+        # отбросим как дубль — зона останется закрытой, а мы об этом не
+        # узнаем.
         with open(EVENTS, "a") as f:
             f.write(json.dumps({**payload, "_fp": fp,
                                 "_received": datetime.now().isoformat()},
                                ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _seen.add(fp)
     return True
 
 
