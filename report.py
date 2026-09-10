@@ -84,8 +84,12 @@ def parse_plan(текст):
                 число = None
         # Дата вида 07.09.2026 — план на конкретный день, он точнее дня недели.
         дата = re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", части[0].strip())
+        неделя = re.match(r"(\d)\s*недел", имя)
         день = next((d for d in ДНИ if имя.startswith(d)), None)
-        if дата and число is not None and точка:
+        if неделя and число is not None:
+            # «1 неделя 908000» — накопительный план месяца, он вне точек.
+            план.setdefault("__недели__", {})[int(неделя.group(1))] = число
+        elif дата and число is not None and точка:
             д, м, г = (int(x) for x in дата.groups())
             план[точка][date(г, м, д).isoformat()] = число
         elif день and число is not None and точка:
@@ -128,6 +132,46 @@ def plan_for(day):
                     - timedelta(days=1)).day
         return month / в_месяце, {}, f"месячный ÷ {в_месяце}"
     return None, {}, None
+
+
+def недели_месяца(day):
+    """Границы недель месяца: календарные, с понедельника по воскресенье.
+    Первая и последняя обычно неполные — так их и планируют."""
+    первое = day.replace(day=1) if False else date(day.year, day.month, 1)
+    последнее = (date(day.year + day.month // 12, day.month % 12 + 1, 1)
+                 - timedelta(days=1))
+    границы, начало, d, n = [], первое, первое, 1
+    while d <= последнее:
+        if d.weekday() == 6 or d == последнее:
+            границы.append((n, начало, d))
+            n += 1
+            начало = d + timedelta(days=1)
+        d += timedelta(days=1)
+    return границы
+
+
+def месячный_план(day):
+    """Сколько должно быть заработано с начала месяца по сегодня.
+
+    Текущая неделя считается пропорционально прошедшим дням: сравнивать
+    факт за три дня с планом на всю неделю бессмысленно, процент выйдет
+    втрое ниже правды.
+    """
+    недели = load_plan().get("month_weeks", {}).get(day.strftime("%Y-%m"))
+    if not недели:
+        return None, None
+    накоплено = 0
+    for n, начало, конец in недели_месяца(day):
+        сумма = недели.get(str(n)) or недели.get(n)
+        if not сумма:
+            continue
+        if конец <= day:
+            накоплено += сумма
+        elif начало <= day:
+            дней = (конец - начало).days + 1
+            прошло = (day - начало).days + 1
+            накоплено += сумма * прошло / дней
+    return накоплено, sum(float(v) for v in недели.values())
 
 
 # ------------------------------------------------------------------- OLAP
@@ -188,6 +232,20 @@ def sales_by_point(s, day):
     return out
 
 
+def month_to_date(s, day):
+    """Выручка с первого числа по этот день включительно."""
+    первое = date(day.year, day.month, 1)
+    body = {"reportType": "SALES", "buildSummary": False,
+            "groupByRowFields": ["RestaurantSection"],
+            "aggregateFields": ["DishDiscountSumInt"],
+            "filters": {"OpenDate.Typed": {
+                "filterType": "DateRange", "periodType": "CUSTOM",
+                "from": первое.isoformat(),
+                "to": (day + timedelta(days=1)).isoformat()}}}
+    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
+    return sum(row.get("DishDiscountSumInt", 0) or 0 for row in r.get("data", []))
+
+
 def cancels(s, day):
     """Отмены доставки по причинам."""
     rows = _olap(s, day, ["Delivery.CancelCause"], ["UniqOrderId"])
@@ -230,12 +288,14 @@ def collect(day=None):
     day = day or date.today()
     with cappi.Syrve() as s:
         d = {"день": day, "продажи": sales(s, day), "точки": sales_by_point(s, day),
-             "отмены": cancels(s, day), "удаления": removals(s, day)}
+             "отмены": cancels(s, day), "удаления": removals(s, day),
+             "месяц_факт": month_to_date(s, day)}
     try:
         d["живые"] = live_orders(day)
     except Exception as e:
         d["живые"] = {"ошибка": str(e)[:120]}
     d["план"], d["план_точки"], d["план_откуда"] = plan_for(day)
+    d["месяц_план"], d["месяц_всего"] = месячный_план(day)
     return d
 
 
@@ -271,6 +331,14 @@ def render(d, live=False):
                 хвост = (f" / {money(пл)}  <b>{pr:.0f}%</b>"
                          + ("  ✅" if pr >= 100 else ("  🟡" if pr >= 85 else "  🔴")))
             строки.append(f"    {кор:<10} {money(ф['сумма']):>9} ₴{хвост}")
+
+    if d.get("месяц_план"):
+        факт, план_нак = d["месяц_факт"], d["месяц_план"]
+        pr = факт / план_нак * 100 if план_нак else 0
+        знак = "✅" if pr >= 100 else ("🟡" if pr >= 85 else "🔴")
+        строки += ["", f"{знак} <b>С начала месяца</b>",
+                   f"    {money(факт)} ₴ / {money(план_нак)} ₴  <b>{pr:.0f}%</b>",
+                   f"    месяц целиком: {money(d['месяц_всего'])} ₴"]
 
     строки += ["",
                f"📦 Заказов: <b>{p['блюда']['чеки']}</b>  <i>(тип товара: Блюдо)</i>",

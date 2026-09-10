@@ -327,7 +327,22 @@ def cmd_plan(chat, текст):
                          f"<i>Он перебивает недельный только на сегодня.</i>")
 
     план, ошибки = report.parse_plan(текст)
+    недели = план.pop("__недели__", None)
+    if недели:
+        p.setdefault("month_weeks", {})[date.today().strftime("%Y-%m")] = недели
     заполненные = {т: д for т, д in план.items() if д}
+    if недели and not заполненные:
+        report.save_plan(p)
+        итого = sum(недели.values())
+        строки = [f"✅ <b>Накопительный план на {date.today():%B %Y}</b>", ""]
+        for n, (_, нач, кон) in enumerate(report.недели_месяца(date.today()), 1):
+            сумма = недели.get(n)
+            if сумма:
+                дней = (кон - нач).days + 1
+                строки.append(f"  неделя {n}: {нач:%d.%m}–{кон:%d.%m} "
+                              f"({дней} дн) — {report.money(сумма)} ₴")
+        строки += ["", f"Итого <b>{report.money(итого)} ₴</b> за месяц"]
+        return say(chat, "\n".join(строки))
     if not заполненные:
         return say(chat, "Не нашёл в тексте дней недели с суммами.\n"
                          "Ожидаю строку с названием точки, а под ней "
