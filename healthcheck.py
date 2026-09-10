@@ -113,14 +113,11 @@ def cloud():
 
 def stop_lists():
     need("SYRVE_CLOUD_URL", "SYRVE_CLOUD_API_KEY", "SYRVE_ORG_ID")
-    tok = cappi._post(f"{CFG['SYRVE_CLOUD_URL']}/api/1/access_token",
-                      {"apiLogin": CFG["SYRVE_CLOUD_API_KEY"]}, timeout=40)["token"]
-    d = cappi._post(f"{CFG['SYRVE_CLOUD_URL']}/api/1/stop_lists",
-                    {"organizationIds": [CFG["SYRVE_ORG_ID"]]},
-                    {"Authorization": f"Bearer {tok}"}, timeout=40)
-    n = sum(len(i.get("items", []))
-            for t in d.get("terminalGroupStopLists", []) for i in t.get("items", []))
-    return f"позиций в стопе: {n}"
+    import stoplist
+    п = stoplist.список()
+    потери = sum(x["цена"] or 0 for x in п)
+    return (f"в стопе {len(п)} позиций на {потери:,.0f} ₴ по прайсу"
+            .replace(",", " ") if п else "стоп-лист пуст")
 
 
 # ------------------------------------------------------------- Витрины

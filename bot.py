@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 import access
 import cappi
+import stoplist
 import report
 import webhook
 
@@ -47,7 +48,8 @@ _lock = threading.Lock()
     "главное": [["💰 Цены", "📈 Показатели"],
                 ["⚙️ Админка"]],
     "цены": [["🔍 Найти позицию"],
-             ["📊 Сверка витрин", "⏳ На проверке"],
+             ["📊 Сверка витрин", "🛑 Стоп-лист"],
+             ["⏳ На проверке"],
              ["◀️ Назад"]],
     "показатели": [["📈 Сейчас", "📅 За вчера"],
                    ["📅 Выбрать день"],
@@ -246,10 +248,22 @@ def screen_item(chat, code, p):
         txt += f"\nзапланировано: <b>{fmt(p['next'])} ₴</b> с {(p['next_date'] or '')[:10]}"
     if not p["in_menu"]:
         txt += "\n<i>не показывается в меню</i>"
-    say(chat, txt, inline=[
-        [{"text": "✏️ Изменить цену", "callback_data": f"ed:{code}"}],
-        [{"text": "👀 Где и почём показывается", "callback_data": f"sh:{code}"}],
-    ])
+    кнопки = [[{"text": "✏️ Изменить цену", "callback_data": f"ed:{code}"}],
+              [{"text": "👀 Где и почём показывается", "callback_data": f"sh:{code}"}]]
+    try:
+        в_стопе = [s for s in stoplist.список() if s["productId"] == p["id"]]
+    except Exception:
+        в_стопе = []
+    if в_стопе:
+        txt += "\n<b>🛑 в стопе:</b> " + ", ".join(s["точка"] for s in в_стопе)
+        кнопки += [[{"text": f"▶️ Снять со стопа · {s['точка']}",
+                     "callback_data": f"sr:{p['id']}:{s['terminalGroupId']}"}]
+                   for s in в_стопе]
+    else:
+        кнопки += [[{"text": f"🛑 В стоп · {имя}", "callback_data": f"sa:{p['id']}:{tid}"}]
+                   for tid, имя in stoplist.терминалы().items()
+                   if имя not in ("Отменённый заказ",)]
+    say(chat, txt, inline=кнопки)
 
 
 def cmd_price(chat, query):
@@ -664,14 +678,51 @@ def _зона_изменилась(e):
             pass
 
 
+def _watch_stoplist(последний):
+    """Раз в пять минут смотрим, что появилось в стопе и что ушло.
+
+    API отдаёт только «как сейчас», поэтому сравниваем со слепком: сам
+    момент попадания в стоп иначе проходит незамеченным, а он и есть то,
+    о чём стоит сказать сразу — позиция перестала продаваться."""
+    if time.time() - последний[0] < 300:
+        return
+    последний[0] = time.time()
+    try:
+        изм = stoplist.изменения()
+    except Exception:
+        return
+    if not (изм["новые"] or изм["ушли"]):
+        return
+    строки = []
+    if изм["новые"]:
+        потери = sum(п["цена"] or 0 for п in изм["новые"])
+        строки.append(f"🛑 <b>В стоп ушло: {len(изм['новые'])}</b>"
+                      + (f" · {report.money(потери)} ₴ по прайсу" if потери else ""))
+        for п in изм["новые"]:
+            строки.append(f"    {п['название'][:36]} — "
+                          f"{report.money(п['цена'] or 0)} ₴  <i>{п['точка']}</i>")
+    if изм["ушли"]:
+        строки.append(f"✅ <b>Вернулось в продажу: {len(изм['ушли'])}</b>")
+        for п in изм["ушли"]:
+            строки.append(f"    {п['название'][:36]}  <i>{п['точка']}</i>")
+    строки.append(f"\n<i>всего в стопе сейчас: {len(изм['всего'])}</i>")
+    for uid in access.подписчики_отчёта():
+        try:
+            say(uid, "\n".join(строки))
+        except Exception:
+            pass
+
+
 def watcher():
-    """Догоняет отложенные проверки, опрашивает Джамшута, шлёт итоги дня."""
+    """Догоняет проверки, опрашивает Джамшута и стоп-лист, шлёт итоги дня."""
     sent = {}
     последний_опрос = [0.0]
+    последний_стоп = [0.0]
     while True:
         try:
             _send_daily(sent)
             _pull_zones(последний_опрос)
+            _watch_stoplist(последний_стоп)
             keep = []
             for it in load_pending():
                 if datetime.now() < datetime.fromisoformat(it["due"]):
@@ -695,6 +746,38 @@ def on_button(q):
     act, _, arg = q["data"].partition(":")
     tg("answerCallbackQuery", callback_query_id=q["id"])
     who = q["from"].get("username") or str(q["from"]["id"])
+
+    if act in ("sr", "sa"):                           # снять / поставить в стоп
+        if not access.можно(chat, "цены"):
+            return say(chat, "Управлять стоп-листом может оператор или админ.")
+        pid, _, tid = arg.partition(":")
+        снять = act == "sr"
+        имя = next((p["name"] for c_, p in find(pid) if p["id"] == pid), pid[:8])
+        точка = stoplist.терминалы().get(tid, tid[:8])
+        return say(chat,
+            f"{'Снять со стопа' if снять else 'Поставить в стоп'}:\n"
+            f"<b>{имя}</b>\nточка: {точка}\n\n"
+            + ("<i>Позиция снова начнёт продаваться.</i>" if снять
+               else "<i>Продажа прекратится сразу.</i>"),
+            inline=[[{"text": "✅ Да", "callback_data":
+                      f"{'sy' if снять else 'sn'}:{pid}:{tid}"},
+                     {"text": "✖️ Отмена", "callback_data": "no:—"}]])
+
+    if act in ("sy", "sn"):                           # подтверждено
+        if not access.можно(chat, "цены"):
+            return
+        pid, _, tid = arg.partition(":")
+        try:
+            if act == "sy":
+                stoplist.снять(pid, tid)
+                say(chat, "✅ Снято со стопа — позиция снова продаётся.")
+            else:
+                stoplist.поставить(pid, tid)
+                say(chat, "🛑 Поставлено в стоп — продажа прекращена.")
+            audit(f'{who}\tстоп\t{pid}\t{"снят" if act == "sy" else "поставлен"}\t{tid}')
+        except Exception as e:
+            say(chat, f"❌ Не получилось: {e}")
+        return
 
     if act == "rd":                                   # отчёт за выбранный день
         d = date.fromisoformat(arg)
@@ -814,6 +897,7 @@ def on_button(q):
     (r"^(отмен|сколько отмен|причины отмен)", lambda chat, m, txt: cmd_cancels(chat)),
 
     # цены
+    (r"^(стоп|что в стопе|стоп.?лист)", lambda chat, m, txt: cmd_stoplist(chat)),
     (r"^(сверк|проверь цен|расхожден|сравни цен)", lambda chat, m, txt: cmd_check(chat)),
     (r"^(помен|измен|постав|обнов)\w*\s+цен\w*\s+(?:на\s+)?(.+?)\s+(?:на|=|до)\s+(\d+)",
      lambda chat, m, txt: команда_цены(chat, m.group(2), m.group(3))),

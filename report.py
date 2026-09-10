@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sys
+import urllib.parse
+import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import date, datetime, timedelta
 
@@ -291,6 +293,60 @@ def removals(s, day):
             for r in rows if r.get("RemovalType")}
 
 
+# ------------------------------------------------------------------- явки
+# Процент выполнения плана не объясняет, почему не дотянули: мало заказов
+# или вывели вдвое больше людей, чем нужно. Выручка на человеко-час
+# объясняет.
+
+def attendance(s, day):
+    """Кто был на смене, сколько часов, и правили ли записи задним числом."""
+    q = urllib.parse.urlencode({"from": day.isoformat(),
+                                "to": (day + timedelta(days=1)).isoformat(),
+                                "key": s.key})
+    xml = cappi._get(f"{s.host}/resto/api/employees/attendance?{q}", timeout=90)
+    имена = _справочник(s, "employees", "employee")
+    роли = _справочник(s, "employees/roles", "role")
+
+    по_ролям, правки, всего_часов = {}, [], 0.0
+    for a in ET.fromstring(xml).findall("attendance"):
+        d1, d2 = a.findtext("dateFrom"), a.findtext("dateTo")
+        if not (d1 and d2):
+            continue                      # смена ещё открыта
+        часов = (datetime.fromisoformat(d2)
+                 - datetime.fromisoformat(d1)).total_seconds() / 3600
+        всего_часов += часов
+        роль = роли.get(a.findtext("roleId")) or "—"
+        r = по_ролям.setdefault(роль, {"людей": 0, "часов": 0.0})
+        r["людей"] += 1
+        r["часов"] += часов
+
+        # Запись, поправленная заметно позже конца смены, — повод посмотреть.
+        изменена = a.findtext("modified")
+        if изменена:
+            try:
+                разрыв = (datetime.fromisoformat(изменена)
+                          - datetime.fromisoformat(d2)).total_seconds() / 60
+                if разрыв > 30:
+                    правки.append({
+                        "кто": имена.get(a.findtext("employeeId")) or "?",
+                        "роль": роль, "смена": f"{d1[11:16]}–{d2[11:16]}",
+                        "через": разрыв, "правил": a.findtext("userModified") or "?"})
+            except Exception:
+                pass
+
+    return {"по_ролям": по_ролям, "часов": всего_часов,
+            "людей": sum(r["людей"] for r in по_ролям.values()),
+            "правки": правки}
+
+
+def _справочник(s, путь, тег):
+    try:
+        xml = cappi._get(f"{s.host}/resto/api/{путь}?key={s.key}", timeout=90)
+        return {x.findtext("id"): x.findtext("name") for x in ET.fromstring(xml).iter(тег)}
+    except Exception:
+        return {}
+
+
 # ------------------------------------------------------------------- жалобы
 # Жалоба — это отзыв с негативной тональностью. Loopa размечает тональность
 # сама, и брать все отзывы подряд бессмысленно: за десять дней их 258, из
@@ -353,6 +409,10 @@ def collect(day=None):
         d = {"день": day, "продажи": sales(s, day), "точки": sales_by_point(s, day),
              "отмены": cancels(s, day), "удаления": removals(s, day),
              "месяц_факт": month_to_date(s, day)}
+        try:
+            d["смена"] = attendance(s, day)
+        except Exception as e:
+            d["смена"] = {"ошибка": str(e)[:100]}
     try:
         d["жалобы"] = complaints(day)
     except Exception as e:
@@ -425,6 +485,17 @@ def render(d, live=False):
         строки += ["", "🗑 Удаления блюд:"]
         for причина, n in sorted(d["удаления"].items(), key=lambda x: -x[1]):
             строки.append(f"    {причина} — {n}")
+
+    см = d.get("смена") or {}
+    if см.get("часов"):
+        на_час = вс["сумма"] / см["часов"] if см["часов"] else 0
+        строки += ["", f"👥 Смена: <b>{см['людей']} чел</b> · "
+                       f"{см['часов']:.0f} человеко-часов",
+                   f"    выручка на час: <b>{money(на_час)} ₴</b>"]
+        for роль, r in sorted(см["по_ролям"].items(), key=lambda x: -x[1]["часов"]):
+            строки.append(f"    {роль} — {r['людей']} чел, {r['часов']:.0f} ч")
+        if см["правки"]:
+            строки.append(f"    ⚠️ <b>правок задним числом: {len(см['правки'])}</b>")
 
     ж = d.get("жалобы") or {}
     if "ошибка" in ж:

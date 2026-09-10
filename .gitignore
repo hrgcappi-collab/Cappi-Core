@@ -12,6 +12,7 @@ zone_events.jsonl
 unknown.log
 plan.json
 access.json
+stoplist.json
 changes.log
 
 __pycache__/
