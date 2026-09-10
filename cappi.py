@@ -280,11 +280,6 @@ def site_prices(city=SITE_CITY):
     return out
 
 
-def site_prices_by_name(city=SITE_CITY):
-    """То же, но ключом название — нужно для Glovo, где guid нет."""
-    return {norm(v["name"]): v["price"] for v in site_prices(city).values()}
-
-
 def glovo_prices():
     """Цены Glovo с карточек витрины.
 

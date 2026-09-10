@@ -18,7 +18,6 @@ Core знает адрес Джамшута и его токен, ходит к 
 точка соприкосновения — HTTP с токеном.
 """
 import json
-import urllib.error
 from datetime import date, datetime, timedelta
 
 import cappi
