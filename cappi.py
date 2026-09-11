@@ -139,13 +139,41 @@ class Syrve:
         d = json.loads(self.get("v2/price", dateFrom=date, dateTo=date))
         return d["response"]
 
-    def price_of(self, product_id, date):
-        """Действующая цена и подразделение. Карточке товара не верим — она устаревает."""
+    def price_of(self, product_id, date, department=None):
+        """Действующая цена и подразделение.
+
+        Подразделений в прейскуранте больше одного: «Cappi Одесса» и
+        «Cappi Днепр» — разные города с разными ценами. Раньше здесь
+        возвращалось первое попавшееся, и какое именно, зависело от порядка
+        строк в ответе. 11.09.2026 из-за этого пять позиций прейскуранта
+        уехали в Днепр, а в Одессе остались старые цены.
+
+        Теперь подразделение задаётся явно и по умолчанию берётся из
+        конфига. Если в нужном подразделении цены нет — возвращаем пусто,
+        а не «ну хоть где-то нашлось»: приказ не в тот город хуже, чем
+        отсутствие приказа.
+        """
+        отдел = department or cfg().get("SYRVE_DEPARTMENT") or None
         for r in self.prices(date):
-            if r["productId"] == product_id and r["prices"]:
-                p = sorted(r["prices"], key=lambda x: x["dateFrom"])[-1]
-                return p["price"], r["departmentId"]
+            if r["productId"] != product_id or not r["prices"]:
+                continue
+            if отдел and r["departmentId"] != отдел:
+                continue
+            p = sorted(r["prices"], key=lambda x: x["dateFrom"])[-1]
+            return p["price"], r["departmentId"]
         return None, None
+
+    def departments(self):
+        """Подразделения прейскуранта: id → название."""
+        xml = _get(f"{self.host}/resto/api/corporation/departments?key={self.key}")
+        out = {}
+        for кусок in re.findall(r"<corporateItemDto>(.*?)</corporateItemDto>",
+                                xml, re.S):
+            ид = re.search(r"<id>(.*?)</id>", кусок)
+            имя = re.search(r"<name>(.*?)</name>", кусок)
+            if ид and имя:
+                out[ид.group(1)] = имя.group(1)
+        return out
 
     def orders(self, date_from, date_to):
         d = json.loads(self.get("v2/documents/menuChange",
@@ -166,7 +194,9 @@ class Syrve:
         витрине другая, и никто об этом не узнает.
         """
         for doc in self.orders(date, date):
-            if any(i["productId"] == product_id for i in doc["items"]):
+            if any(i["productId"] == product_id
+                   and i["departmentId"] == department_id
+                   for i in doc["items"]):
                 raise PriceOrderExists(doc["documentNumber"], date)
         return self.create_price_order(product_id, department_id, price, date)
 
@@ -181,11 +211,16 @@ class Syrve:
         Проверка занятых позиций одна на всю пачку и до отправки: половина
         применённого списка — худший исход из возможных.
         """
+        # Занятость считаем по паре «позиция + подразделение»: одна и та же
+        # позиция может законно менять цену и в Одессе, и в Днепре одним
+        # днём — это разные прейскуранты.
         занято = {}
         for doc in self.orders(date, date):
             for i in doc["items"]:
-                занято.setdefault(i["productId"], doc["documentNumber"])
-        конфликт = [(r, занято[r["pid"]]) for r in строки if r["pid"] in занято]
+                занято.setdefault((i["productId"], i["departmentId"]),
+                                  doc["documentNumber"])
+        конфликт = [(r, занято[(r["pid"], r["dep"])]) for r in строки
+                    if (r["pid"], r["dep"]) in занято]
         if конфликт:
             raise PriceOrderExists(конфликт[0][1], date, конфликт)
         return self.create_price_order(строки, date)
