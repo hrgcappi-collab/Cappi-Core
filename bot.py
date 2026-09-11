@@ -309,7 +309,8 @@ def помощь(chat):
               "  кассовая смена: так цена не прыгает посреди дня и не",
               f"  задевает принятые заказы. Через {CHECK_AFTER_MIN} минут после",
               "  выгрузки бот сам сверит сайт и Glovo и напишет результат.",
-              f"  Скачок больше {MAX_CHANGE_PCT}% сам не проводит — защита от опечатки."]
+              f"  Скачок больше {MAX_CHANGE_PCT}% переспросит один раз —"
+              f"  это защита от опечатки, а не запрет."]
 
     if access.можно(chat, "показатели"):
         т += ["", "<b>Люди и премии</b>",
@@ -633,22 +634,41 @@ def _default_date():
     return date.today() + timedelta(days=1) if DEFAULT_TOMORROW else date.today()
 
 
-def prepare(chat, code, new_price, when, user):
+def prepare(chat, code, new_price, when, user, несмотря=False):
+    """Готовим изменение и показываем карточку подтверждения.
+
+    Ещё ничего не меняем. `несмотря` — человек увидел предупреждение о
+    крупном скачке и подтвердил, что цена верная.
+    """
     if not access.можно(chat, "цены"):
         return say(chat, f"Менять цены может оператор или админ, "
                          f"а у тебя роль «{access.роль(chat) or 'без роли'}». "
                          f"Посмотреть цену могу.")
-    """Готовим изменение и показываем карточку подтверждения. Ещё ничего не меняем."""
     hits = [h for h in find(code) if str(h[0]).lower() == str(code).lower()]
     if not hits:
         return say(chat, f"Нет позиции с артикулом <code>{code}</code>.")
     _, p = hits[0]
     old = p["price"]
-    if abs(new_price - old) / max(old, 1) * 100 > MAX_CHANGE_PCT:
-        return say(chat, f"⚠️ Скачок больше {MAX_CHANGE_PCT}%: "
-                         f"<b>{fmt(old)} → {fmt(new_price)} ₴</b>\n"
-                         f"Похоже на опечатку. Такие изменения бот не проводит — "
-                         f"если это правда нужно, делай в Syrve руками.")
+    скачок = abs(new_price - old) / max(old, 1) * 100
+    if скачок > MAX_CHANGE_PCT and not несмотря:
+        # Порог защищает от опечатки, а не запрещает крупные правки. Раньше
+        # здесь был тупик и совет «делай в Syrve руками» — а руками как раз
+        # и не надо: приказ, сделанный мимо бота, никто потом не проверит на
+        # витринах. Спрашиваем второй раз и проводим.
+        куда = "дороже" if new_price > old else "дешевле"
+        тк = f"J{int(time.time())}{chat % 1000}"
+        with _lock:
+            _confirm[тк] = {"скачок": True, "code": code, "price": new_price,
+                            "date": when.isoformat(), "chat": chat, "user": user}
+        return say(chat,
+                   f"⚠️ <b>{p['name']}</b>\n"
+                   f"<b>{fmt(old)} → {fmt(new_price)} ₴</b> — "
+                   f"на {скачок:.0f}% {куда}\n\n"
+                   f"Это больше порога в {MAX_CHANGE_PCT}%, который стоит "
+                   f"против опечатки. Если цена верная — проведу.",
+                   inline=[[{"text": "⚠️ Да, цена верная",
+                             "callback_data": f"gv:{тк}"},
+                            {"text": "✖️ Отмена", "callback_data": f"no:{тк}"}]])
     with cappi.Syrve() as s:
         match = [x for x in s.products() if str(x.get("num")) == str(code)]
         if not match:
@@ -826,8 +846,8 @@ def cmd_price_list(chat, текст, who):
         текст_ += ["", f"⚠️ <b>Не беру — скачок больше {MAX_CHANGE_PCT}%:</b>"]
         текст_ += [f"• {r['название']}: {fmt(r['было'])} → {fmt(r['цена'])} ₴"
                    for r in скачки[:8]]
-        текст_.append("<i>Похоже на опечатку. Если цена верная — "
-                      "жми «взять и скачки», внизу.</i>")
+        текст_.append("<i>Порог против опечатки. Если цены верные — "
+                      "жми «взять и скачки» внизу.</i>")
 
     сегодня = когда == date.today()
     текст_ += ["", ("Проведу <b>сейчас</b>, посреди дня — задену открытые смены."
@@ -1691,6 +1711,12 @@ def on_button(q):
         cur = date.fromisoformat(c["date"])
         new = date.today() + timedelta(days=1) if cur == date.today() else date.today()
         return prepare(chat, c["code"], c["price"], new, who)
+
+    if act == "gv":                                   # скачок подтверждён
+        д = дата_из_текста(c["date"])
+        if д is None:
+            return say(chat, "Кнопка устарела — начни заново.")
+        return prepare(chat, c["code"], c["price"], д, who, несмотря=True)
 
     if act == "gl":                                   # провести список
         return провести_список(chat, c, who)
