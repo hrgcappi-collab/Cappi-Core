@@ -35,7 +35,7 @@ UNKNOWN = os.path.join(STATE_DIR, "unknown.log")    # что бот не пон�
 ALERTS = os.path.join(STATE_DIR, "alerts_seen.json")  # о чём уже сообщали
 DENIED = os.path.join(STATE_DIR, "denied.log")      # кто стучался без доступа
 
-REPORT_AT = "22:00"         # когда присылать итоги дня
+REPORT_AT = "22:30"         # когда присылать итоги дня
 CHECK_AFTER_MIN = 30        # через сколько проверять, доехала ли цена
 MAX_CHANGE_PCT = 50         # скачок больше этого бот не проводит
 
