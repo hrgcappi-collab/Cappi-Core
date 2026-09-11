@@ -374,25 +374,45 @@ def cmd_price(chat, query):
           "callback_data": f"it:{code}"}] for code, p in hits])
 
 
-def cmd_check(chat):
-    say(chat, "Сверяю Syrve ↔ сайт ↔ Glovo, это займёт минуту…")
+def расхождения_витрин():
+    """Где Syrve, сайт и Glovo показывают разные цены.
+
+    Гость платит по витрине, а не по Syrve. Пока эту сверку надо было
+    запускать руками, «Моршинська без газу 0,5 л» полтора месяца
+    продавалась на Glovo за 99 ₴ при цене 49 — и узнали об этом случайно.
+    """
     syr = {k: v for k, v in cappi.cloud_prices().items() if v["in_menu"]}
     site, glovo = cappi.site_prices(), cappi.glovo_prices()
-    bad = []
+    расхождения = []
     for code, v in sorted(syr.items(), key=lambda x: x[1]["name"]):
         row = site.get(v["id"])                       # сайт — точно по guid
-        s = row["price"] if row else None
-        g = glovo.get(cappi.norm(v["name"]))          # Glovo — только по названию
-        if s is None and g is None:
+        сайт = row["price"] if row else None
+        гл = glovo.get(cappi.norm(v["name"]))         # Glovo — только по названию
+        if сайт is None and гл is None:
             continue
-        if (s is not None and s != v["price"]) or (g is not None and abs(g - v["price"]) > 0.01):
-            bad.append(f"<code>{code}</code> {v['name'][:34]}\n"
-                       f"     Syrve <b>{fmt(v['price'])}</b> · сайт {fmt(s) if s is not None else '—'}"
-                       f" · Glovo {fmt(g) if g is not None else '—'}")
-    head = (f"Syrve {len(syr)} · сайт {len(site)} · Glovo {len(glovo)}\n"
+        if ((сайт is not None and сайт != v["price"])
+                or (гл is not None and abs(гл - v["price"]) > 0.01)):
+            расхождения.append({"код": code, "название": v["name"],
+                                "syrve": v["price"], "сайт": сайт, "glovo": гл})
+    return расхождения, {"syrve": len(syr), "сайт": len(site), "glovo": len(glovo)}
+
+
+def _строка_расхождения(r):
+    return (f"<code>{r['код']}</code> {r['название'][:34]}\n"
+            f"     Syrve <b>{fmt(r['syrve'])}</b> · "
+            f"сайт {fmt(r['сайт']) if r['сайт'] is not None else '—'} · "
+            f"Glovo {fmt(r['glovo']) if r['glovo'] is not None else '—'}")
+
+
+def cmd_check(chat):
+    say(chat, "Сверяю Syrve ↔ сайт ↔ Glovo, это займёт минуту…")
+    плохие, сколько = расхождения_витрин()
+    head = (f"Syrve {сколько['syrve']} · сайт {сколько['сайт']} · "
+            f"Glovo {сколько['glovo']}\n"
             f"<i>сайт сверяется по артикулу, Glovo — по названию</i>\n\n")
-    say(chat, head + ("❌ <b>Расхождения</b>\n\n" + "\n".join(bad[:25])
-                      if bad else "✅ Расхождений нет"))
+    say(chat, head + ("❌ <b>Расхождения</b>\n\n"
+                      + "\n".join(_строка_расхождения(r) for r in плохие[:25])
+                      if плохие else "✅ Расхождений нет"))
 
 
 def cmd_pending(chat):
@@ -1082,13 +1102,34 @@ def _просить_корректировки(последний):
     if time.time() - последний[0] < 3600:
         return
     последний[0] = time.time()
-    шеф = kpi.люди().get("шеф_id")
-    if not шеф or date.today().day != kpi.ЗАПРОС_КОРРЕКТИРОВОК_ДЕНЬ:
+    if date.today().day != kpi.ЗАПРОС_КОРРЕКТИРОВОК_ДЕНЬ:
         return
     месяц, конец = kpi.прошлый_месяц()
     if kpi.состояние_запроса("правки:" + месяц).get("отправлен"):
         return
     имя_месяца = МЕСЯЦЫ[конец.month - 1]
+    шеф = kpi.люди().get("шеф_id")
+    if not шеф:
+        # Молчать в этом месте — худшее, что можно сделать: проценты
+        # разделятся по неисправленным часам, и никто не узнает, что запрос
+        # вообще не уходил. Поэтому говорим администраторам.
+        for admin in (int(u) for u, v in access.все().items()
+                      if v.get("роль") == "админ"):
+            try:
+                say(admin, f"⚠️ <b>Некому отправить запрос правок за "
+                           f"{имя_месяца}</b>\n"
+                           f"Шеф не привязан к боту, поэтому часы кухни "
+                           f"останутся такими, как в явках — со всеми "
+                           f"ошибками ролей.\n\n"
+                           f"Привязать: <code>/people шеф_id 123456789</code>\n"
+                           f"<i>id шефа — пусть напишет боту, бот покажет его "
+                           f"в ответе.</i>")
+            except Exception:
+                pass
+        kpi.состояние_запроса("правки:" + месяц,
+                              {"отправлен": date.today().isoformat(),
+                               "некому": True})
+        return
     try:
         say(int(шеф),
             f"🍳 <b>Часы кухни за {имя_месяца}</b>\n\n"
@@ -1178,6 +1219,41 @@ def _просить_тайники(последний):
             pass
     kpi.состояние_запроса(месяц, {**с, "последний": date.today().isoformat(),
                                   "напоминаний": н})
+
+
+def _watch_витрины(последний):
+    """Раз в сутки сверяем витрины и сообщаем о новом расхождении.
+
+    Сверка была только кнопкой. Кнопку жмут, когда что-то заподозрили, —
+    а цена на витрине расходится молча, и заметить её можно лишь случайно.
+    Говорим только о новом: одно и то же расхождение каждый день
+    превращается в шум, который перестают читать.
+    """
+    if time.time() - последний[0] < 86400:
+        return
+    последний[0] = time.time()
+    try:
+        плохие, _ = расхождения_витрин()
+    except Exception as e:
+        bugs.записать("апи", f"сверка витрин не прошла: {e}", где="сторож")
+        return
+    было = _виденное("витрины")
+    новые = [r for r in плохие
+             if f"{r['код']}|{r['syrve']}|{r['сайт']}|{r['glovo']}" not in было]
+    if not новые:
+        return
+    _запомнить("витрины", [f"{r['код']}|{r['syrve']}|{r['сайт']}|{r['glovo']}"
+                           for r in плохие])
+    текст = ("💸 <b>Витрина расходится с Syrve</b>\n"
+             "<i>Гость платит по витрине — это живые деньги.</i>\n\n"
+             + "\n".join(_строка_расхождения(r) for r in новые[:10]))
+    if len(новые) > 10:
+        текст += f"\n\n<i>…и ещё {len(новые) - 10}</i>"
+    for кому in access.подписчики_отчёта():
+        try:
+            say(кому, текст)
+        except Exception:
+            pass
 
 
 def _watch_losses(последний):
@@ -1297,6 +1373,7 @@ def watcher():
     последний_стоп = [0.0]
     последний_потери = [0.0]
     последний_тайник = [0.0]
+    последняя_сверка = [0.0]
     последняя_чистка = [0.0]
     последний_правки = [0.0]      # свой таймер: общий с тайниками не срабатывал
     while True:
@@ -1306,6 +1383,7 @@ def watcher():
             _просить_тайники(последний_тайник)
             _просить_корректировки(последний_правки)
             _pull_zones(последний_опрос)
+            _watch_витрины(последняя_сверка)
             _watch_stoplist(последний_стоп)
             _watch_losses(последний_потери)
             with _очередь:
