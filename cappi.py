@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Общая библиотека Cappi: Syrve Server API, Cloud API, сайт, Glovo."""
-import hashlib, json, os, re, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, re, time, urllib.error, urllib.parse, urllib.request
 from html import unescape
 
 ENV = os.path.expanduser("~/.cappi/api.env")
@@ -43,13 +43,30 @@ class _R308(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_R308)
 
 
+# Сколько раз переждать 429. Syrve ограничивает частоту запросов, и под
+# нагрузкой — сводный отчёт, просчёт себестоимости, фоновые сторожа —
+# упереться в лимит нормально. Ненормально показывать человеку «ошибка
+# 429» вместо цифры, которую достаточно было подождать секунду.
+ПОВТОРОВ_ПРИ_429 = 3
+
+
+def _подождать(попытка):
+    time.sleep(min(2 ** попытка, 8))
+
+
 def _get(url, headers=None, timeout=60):
-    req = urllib.request.Request(url, headers={**UA, **(headers or {})})
-    with _OPENER.open(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+    for попытка in range(ПОВТОРОВ_ПРИ_429 + 1):
+        req = urllib.request.Request(url, headers={**UA, **(headers or {})})
+        try:
+            with _OPENER.open(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or попытка == ПОВТОРОВ_ПРИ_429:
+                raise
+            _подождать(попытка)
 
 
-def _post(url, body, headers=None, timeout=60):
+def _post(url, body, headers=None, timeout=60, попытка=0):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **UA, **(headers or {})})
@@ -66,6 +83,9 @@ def _post(url, body, headers=None, timeout=60):
             raise RuntimeError(
                 f"ответ не JSON: {тело[:150].decode('utf-8', 'replace')}") from None
     except urllib.error.HTTPError as e:
+        if e.code == 429 and попытка < ПОВТОРОВ_ПРИ_429:
+            _подождать(попытка)
+            return _post(url, body, headers, timeout, попытка + 1)
         # Syrve объясняет отказ в теле ответа. Без него остаётся голое
         # «409 Conflict», по которому невозможно понять, что не так.
         detail = e.read().decode("utf-8", "replace")[:300].strip()
@@ -97,6 +117,14 @@ def norm_full(s):
 
 
 # ---------------------------------------------------------------- Syrve Server
+class ТехкартаЗакрыта(RuntimeError):
+    """Syrve не даёт менять техкарты через API на этой установке."""
+
+    def __init__(self):
+        super().__init__("Syrve не принимает техкарты через API "
+                         "(ASSEMBLY_CHART_IS_NOT_EDITABLE)")
+
+
 class ЧужойОтдел(RuntimeError):
     """Попытка тронуть подразделение, которое мы не ведём."""
 
@@ -207,6 +235,47 @@ class Syrve:
             if ид and имя:
                 out[ид.group(1)] = имя.group(1)
         return out
+
+    def создать_товар(self, карточка):
+        """Новая позиция номенклатуры.
+
+        Артикул и быстрый код Syrve присваивает сам — переданные
+        игнорирует. И save только создаёт: повторная отправка той же
+        карточки с тем же id делает вторую позицию, а не обновляет первую.
+        Проверено 11.09.2026, пришлось убирать дубль.
+        """
+        r = _post(f"{self.host}/resto/api/v2/entities/products/save?key={self.key}",
+                  карточка, timeout=60)
+        if r.get("result") != "SUCCESS":
+            raise RuntimeError(f"Syrve отказал: {r.get('errors') or r}")
+        return r["response"]
+
+    def удалить_товары(self, ids):
+        """Пометить позиции удалёнными. Формат придирчивый: список
+        объектов с id, не список строк."""
+        r = _post(f"{self.host}/resto/api/v2/entities/products/delete?key={self.key}",
+                  {"items": [{"id": i} for i in ids]}, timeout=60)
+        if r.get("result") != "SUCCESS":
+            raise RuntimeError(f"Syrve отказал: {r.get('errors') or r}")
+        return r["response"]
+
+    def сохранить_техкарту(self, карта):
+        """Техкарта. На нашей сборке Syrve это запрещает.
+
+        Сервер отвечает ASSEMBLY_CHART_IS_NOT_EDITABLE при любом наборе
+        полей, любой дате и с id и без. Пользователь api — системный
+        администратор, так что права ни при чём: ручка закрыта на стороне
+        Syrve. Оставлено рабочим на случай, если её откроют.
+        """
+        r = _post(f"{self.host}/resto/api/v2/assemblyCharts/save?key={self.key}",
+                  карта, timeout=60)
+        if r.get("result") != "SUCCESS":
+            ошибки = r.get("errors") or []
+            коды = {e.get("code") for e in ошибки if isinstance(e, dict)}
+            if "ASSEMBLY_CHART_IS_NOT_EDITABLE" in коды:
+                raise ТехкартаЗакрыта()
+            raise RuntimeError(f"Syrve отказал: {ошибки or r}")
+        return r["response"]
 
     def orders(self, date_from, date_to):
         d = json.loads(self.get("v2/documents/menuChange",
