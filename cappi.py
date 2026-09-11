@@ -167,6 +167,20 @@ class PriceOrderExists(RuntimeError):
         super().__init__(f"на {date} по этой позиции уже есть приказ №{number}")
 
 
+def HQ():
+    """Сессия к серверу сети (chain), а не к торговой точке.
+
+    Разница не косметическая. ТП отвечает на `assemblyCharts/save`
+    отказом ASSEMBLY_CHART_IS_NOT_EDITABLE при любом составе, а HQ ту же
+    карту принимает и сохраняет. Номенклатура и техкарты ведутся в сети,
+    поэтому и писать их нужно туда; ТП остаётся для цен и продаж.
+    """
+    c = cfg()
+    return Syrve(host=c.get("SYRVE_SERVER_URL"),
+                 login=c.get("SYRVE_API_LOGIN"),
+                 password=c.get("SYRVE_API_PASSWORD"))
+
+
 class Syrve:
     """Сессия к Syrve Server API. Занимает слот лицензии — всегда закрывать."""
 
@@ -259,13 +273,28 @@ class Syrve:
             raise RuntimeError(f"Syrve отказал: {r.get('errors') or r}")
         return r["response"]
 
-    def сохранить_техкарту(self, карта):
-        """Техкарта. На нашей сборке Syrve это запрещает.
+    def техкарты(self, с, по):
+        """Техкарты за период.
 
-        Сервер отвечает ASSEMBLY_CHART_IS_NOT_EDITABLE при любом наборе
-        полей, любой дате и с id и без. Пользователь api — системный
-        администратор, так что права ни при чём: ручка закрыта на стороне
-        Syrve. Оставлено рабочим на случай, если её откроют.
+        Период полуинтервальный, как в OLAP: «сегодня..сегодня» вернёт
+        пусто, и записанная минуту назад карта покажется несохранённой.
+        Поэтому `по` всегда сдвигаем на день вперёд.
+        """
+        r = json.loads(_get(
+            f"{self.host}/resto/api/v2/assemblyCharts/getAll?key={self.key}"
+            f"&dateFrom={с}&dateTo={по}", timeout=180))
+        return r.get("assemblyCharts") or []
+
+    def сохранить_техкарту(self, карта):
+        """Техкарта. Работает только на сервере сети, не на торговой точке.
+
+        ТП отвечает ASSEMBLY_CHART_IS_NOT_EDITABLE при любом наборе полей
+        и любой дате — проверено 11.09.2026. HQ ту же карту принимает.
+        Поэтому вызывать это следует на сессии HQ().
+
+        Строки должны повторять формат живых карт целиком, включая нули
+        для amountIn1..3 и packageCount: без них сервер падает с
+        NullPointerException, а лишнее поле «amount» отвергает.
         """
         r = _post(f"{self.host}/resto/api/v2/assemblyCharts/save?key={self.key}",
                   карта, timeout=60)

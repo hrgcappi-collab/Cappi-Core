@@ -1753,7 +1753,7 @@ def on_button(q):
         nomenclature.запомнить(ждём["имя"], товар.get("num"))
         if ждём["what"] == "техкарта_выбор":
             return записать_техкарту(chat, ждём["текст"],
-                                     {"товар": ждём["товар"]})
+                                     {"товар": ждём["товар"]}, who)
         return показать_состав(chat, ждём["текст"])
 
     if act == "тм":                                   # тайник: выбрали месяц
@@ -3505,7 +3505,9 @@ def создать_блюдо(chat, c, who):
         if донор and донор.get(поле):
             карточка[поле] = донор[поле]
     try:
-        with cappi.Syrve() as s:
+        # Номенклатура ведётся в сети, а не на точке: создаём в HQ, оттуда
+        # позиция расходится на ТП сама.
+        with cappi.HQ() as s:
             созданное = s.создать_товар(карточка)
     except Exception as e:
         return say(chat, f"❌ Не получилось: {str(e)[:180]}")
@@ -3544,7 +3546,7 @@ def техкарта_для(chat, c):
               f"<i>Посчитаю себестоимость и соберу техкарту.</i>")
 
 
-def записать_техкарту(chat, текст, ждём):
+def записать_техкарту(chat, текст, ждём, who="—"):
     товар = ждём["товар"]
     найдено, спорные, мимо = разобрать_состав(текст)
     if спорные:
@@ -3558,15 +3560,25 @@ def записать_техкарту(chat, текст, ждём):
     if not найдено:
         return say(chat, "Не разобрал состав. Формат: «рис 130 г».")
     r = cost.по_составу(найдено)
+    # Формат строки повторяет живые карты целиком: без нулей в
+    # amountIn1..3 и packageCount сервер падает с NullPointerException.
     карта = {
         "assembledProductId": товар["id"],
-        "dateFrom": date.today().isoformat(),
+        "dateFrom": date.today().isoformat(), "dateTo": None,
         "assembledAmount": 1,
         "productWriteoffStrategy": "ASSEMBLE",
+        "effectiveDirectWriteoffStoreSpecification": {"departments": [],
+                                                      "inverse": False},
         "productSizeAssemblyStrategy": "COMMON",
-        "items": [{"productId": т["id"], "sortWeight": float(i),
-                   "amountIn": кол, "amountMiddle": кол, "amountOut": кол}
+        "items": [{"sortWeight": float(i), "productId": т["id"],
+                   "productSizeSpecification": None, "storeSpecification": None,
+                   "amountIn": кол, "amountMiddle": кол, "amountOut": кол,
+                   "amountIn1": 0, "amountOut1": 0, "amountIn2": 0,
+                   "amountOut2": 0, "amountIn3": 0, "amountOut3": 0,
+                   "packageCount": 0, "packageTypeId": None}
                   for i, (т, кол) in enumerate(найдено)],
+        "technologyDescription": "", "description": "", "appearance": "",
+        "organoleptic": "", "outputComment": "",
     }
     строки = [f"📋 <b>Техкарта · {товар['name']}</b>", ""]
     for т, кол in найдено:
@@ -3577,15 +3589,30 @@ def записать_техкарту(chat, текст, ждём):
         строки.append(f"при цене {fmt(цена)} ₴ — фудкост "
                       f"<b>{cost.фудкост(r['итого'], цена):.1f}%</b>")
     try:
-        with cappi.Syrve() as s:
+        # Техкарты принимает только сервер сети: ТП на ту же карту
+        # отвечает отказом.
+        with cappi.HQ() as s:
             s.сохранить_техкарту(карта)
-        строки += ["", "✅ <i>Техкарта записана в Syrve.</i>"]
+            проверка = [a for a in s.техкарты(
+                date.today().isoformat(),
+                (date.today() + timedelta(days=1)).isoformat())
+                if a["assembledProductId"] == товар["id"]]
+        if проверка:
+            строки += ["", f"✅ <b>Техкарта записана</b> — "
+                           f"{склонение(len(проверка[0]['items']), 'строка', 'строки', 'строк')} "
+                           f"с {date.today():%d.%m}."]
+            audit(f"{who}\tтехкарта\t{товар.get('num')}\t{товар['name']}\t"
+                  f"{len(найдено)} ингр.\tсс {r['итого']:.2f}")
+        else:
+            # Ответ «успешно» без карты в базе — худший исход: человек
+            # уверен, что списание настроено, а его нет.
+            строки += ["", "⚠️ <b>Syrve ответил «успешно», но карты в базе "
+                           "нет.</b>\n<i>Проверь в Office, прежде чем "
+                           "запускать блюдо в продажу.</i>"]
     except cappi.ТехкартаЗакрыта:
         строки += ["", "⚠️ <b>Syrve не принимает техкарты через API.</b>",
-                   "<i>Проверено: отказывает при любом составе и любой дате, "
-                   "и права здесь ни при чём. Состав выше — в том виде, в "
-                   "каком его останется вбить в Office: артикул, название, "
-                   "количество в основной единице.</i>"]
+                   "<i>Состав выше — в том виде, в каком его останется "
+                   "вбить в Office.</i>"]
     except Exception as e:
         строки += ["", f"❌ <i>{str(e)[:160]}</i>"]
     if r["дыры"]:
@@ -3699,7 +3726,7 @@ def on_message(m):
         if st["what"] == "состав":
             return показать_состав(chat, text)
         if st["what"] == "техкарта":
-            return записать_техкарту(chat, text, st)
+            return записать_техкарту(chat, text, st, who)
         if st["what"].startswith("блюдо_"):
             return блюдо_шаг(chat, text, st)
         if st["what"] == "тайник":
