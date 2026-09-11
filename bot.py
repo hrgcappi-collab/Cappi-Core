@@ -299,7 +299,8 @@ def помощь(chat):
     if access.можно(chat, "цены"):
         т += ["", "<b>Поменять цену</b>",
               "  <code>окрошка</code> — найти позицию, дальше кнопками",
-              "  <code>/set 03275 46</code> — одна позиция",
+              "  <code>/set 03275 46</code> — одна позиция, ночью",
+              "  <code>/set 03275 46 сейчас</code> — прямо сейчас",
               "  Списком — просто пришли прейскурант, по строке на позицию:",
               "  <code>Д Соус унагі 20 гр. 36</code>",
               "  <code>Д_Тофу 20 гр 46</code>",
@@ -930,9 +931,12 @@ def провести_список(chat, c, who):
                                   ).isoformat()})
         save_pending(items)
     say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён — "
-              f"<b>{len(строки)} позиций</b> с "
+              f"<b>{склонение(len(строки), 'позиция', 'позиции', 'позиций')}</b> с "
               f"{date.fromisoformat(когда):%d.%m}.\n\n"
-              f"Витрины проверю сам и напишу, если где-то не совпадёт.")
+              + ("<i>Цены уже в Syrve. Выгрузка идёт раз в 20 минут — "
+                 "слежу и напишу, как только встанут на сайте.</i>" if сегодня else
+                 "<i>Сайт и Glovo проверю сам и напишу, если где-то "
+                 "не совпадёт.</i>"))
 
 
 # ------------------------------------------------------- фоновая проверка
@@ -974,12 +978,47 @@ def _check_planned(it):
             "due": datetime.fromisoformat(it["date"]).replace(hour=10).isoformat()}
 
 
+# Сколько ждём «сейчас»: выгрузка идёт раз в 20 минут, Glovo подтягивается
+# позже. Ждать молча целый час нельзя — человек поменял цену среди дня
+# именно потому, что она нужна сейчас.
+БЫСТРАЯ_ПРОВЕРКА_МИН = 2
+ЖДЁМ_ВЫГРУЗКУ_МИН = 75
+
+
 def _check_showcase(it):
-    """Цена уже должна была смениться — сверяем сайт и Glovo."""
+    """Цена уже должна была смениться — сверяем сайт и Glovo.
+
+    Для смены «прямо сейчас» проверяем часто и коротко: как только цена
+    появилась — говорим. Одна проверка через полчаса отвечала на вопрос
+    «доехало?» ровно один раз и почти всегда не вовремя.
+    """
     site, glovo = where_shown(it.get("guid", ""), it["name"])
     p = it["price"]
     ok_site = site is not None and abs(site - p) < 0.01
     ok_glovo = glovo is not None and abs(glovo - p) < 0.01
+    сейчас = it["date"] == date.today().isoformat()
+    ждём = it.get("ждём_с") or datetime.now().isoformat()
+    прошло = (datetime.now() - datetime.fromisoformat(ждём)).total_seconds() / 60
+    # Сайт — главное: Glovo тянет с задержкой и своим расписанием, из-за
+    # него можно ждать час и в итоге сказать то же самое.
+    доехало = ok_site or (site is None and ok_glovo)
+    if сейчас and not доехало and прошло < ЖДЁМ_ВЫГРУЗКУ_МИН:
+        if not it.get("ждём_с"):
+            say(it["chat"],
+                f"⏳ <b>{it['name']}</b> — приказ проведён, жду выгрузку.\n"
+                f"<i>Она идёт раз в 20 минут. Проверяю каждые "
+                f"{БЫСТРАЯ_ПРОВЕРКА_МИН} минуты и напишу, как только цена "
+                f"встанет на сайте.</i>")
+        return {**it, "ждём_с": ждём,
+                "due": (datetime.now()
+                        + timedelta(minutes=БЫСТРАЯ_ПРОВЕРКА_МИН)).isoformat()}
+    if сейчас and доехало and it.get("ждём_с"):
+        say(it["chat"],
+            f"✅ <b>Цена на сайте</b> — через {прошло:.0f} мин после приказа\n"
+            f"{it['name']}: <b>{fmt(it['old'])} → {fmt(p)} ₴</b>"
+            + ("" if ok_glovo else "\n\n<i>Glovo подтянется позже, "
+                                   "у него своё расписание.</i>"))
+        return None
     mark = lambda ok, v: ("✅" if ok else "❌") + f" {fmt(v) if v is not None else 'нет'}"
     say(it["chat"],
         ("✅ Цена доехала везде" if ok_site and ok_glovo
@@ -1829,10 +1868,15 @@ def on_button(q):
     if act == "go":
         try:
             doc = do_change(c)
+            сейчас = c["date"] == date.today().isoformat()
             say(chat, f"✅ Приказ <b>№{doc['documentNumber']}</b> проведён\n"
                       f"{c['name']}: <b>{fmt(c['old'])} → {fmt(c['price'])} ₴</b> "
                       f"с {date.fromisoformat(c['date']):%d.%m}\n\n"
-                      f"Проверю витрины через {CHECK_AFTER_MIN} минут.")
+                      + ("<i>Цена уже в Syrve. Выгрузка на сайт идёт раз в "
+                         "20 минут — слежу и напишу, как только встанет.</i>"
+                         if сейчас else
+                         f"<i>Проверю сайт и Glovo утром "
+                         f"{date.fromisoformat(c['date']):%d.%m}.</i>"))
         except cappi.PriceOrderExists as e:
             other = date.fromisoformat(c["date"]) + timedelta(days=1)
             say(chat,
