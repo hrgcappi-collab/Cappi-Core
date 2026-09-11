@@ -1507,8 +1507,13 @@ def watcher():
                         keep.append(it)
                         continue
                     try:
-                        nxt = (_check_planned(it) if it.get("stage") == "planned"
-                               else _check_showcase(it))
+                        стадия = it.get("stage")
+                        if стадия == "новая_цена":
+                            nxt = _ждать_позицию(it)
+                        elif стадия == "planned":
+                            nxt = _check_planned(it)
+                        else:
+                            nxt = _check_showcase(it)
                     except Exception as e:
                         # Сбой по одному элементу не должен ронять цикл: иначе
                         # уже обработанные шлются повторно, а вечно падающий
@@ -3646,6 +3651,52 @@ def записать_техкарту(chat, текст, ждём, who="—"):
 
 
 
+def _есть_на_точке(guid):
+    """Доехала ли позиция из сети на торговую точку."""
+    try:
+        with cappi.Syrve() as s:
+            return any(p["id"] == guid and not p.get("deleted")
+                       for p in s.products())
+    except Exception:
+        return False
+
+
+def _ждать_позицию(it):
+    """Ждём репликацию и ставим цену, когда позиция появится на точке."""
+    начало = it.get("ждём_с") or datetime.now().isoformat()
+    прошло = (datetime.now() - datetime.fromisoformat(начало)).total_seconds() / 60
+    if not _есть_на_точке(it["guid"]):
+        if прошло > 90:
+            say(it["chat"],
+                f"⚠️ <b>{it['name']}</b> так и не доехало на точку за полтора "
+                f"часа — цену не поставил.\n"
+                f"<i>Проверь обмен между сетью и точкой в Syrve, потом "
+                f"поставь цену командой /set {it.get('code')} "
+                f"{fmt(it['price'])}.</i>")
+            return None
+        return {**it, "ждём_с": начало,
+                "due": (datetime.now() + timedelta(minutes=3)).isoformat()}
+    строка = {"pid": it["guid"], "dep": cappi.отдел(), "price": it["price"],
+              "название": it["name"], "было": None, "код": it.get("code")}
+    try:
+        with cappi.Syrve() as s:
+            doc = s.set_prices([строка], it["date"])
+    except Exception as e:
+        say(it["chat"], f"❌ Цену поставить не вышло: {str(e)[:150]}")
+        return None
+    audit(f"{it.get('user', '—')}\t{it.get('code')}\t{it['name']}\t"
+          f"новое -> {it['price']}\tс {it['date']}\tприказ №{doc['documentNumber']}")
+    фк = cost.фудкост(it["сс"], it["price"]) if it.get("сс") else None
+    say(it["chat"],
+        f"✅ <b>Приказ №{doc['documentNumber']}</b> — {it['name']} по "
+        f"<b>{fmt(it['price'])} ₴</b> с "
+        f"{date.fromisoformat(it['date']):%d.%m}.\n"
+        + (f"фудкост <b>{фк:.1f}%</b>\n" if фк else "")
+        + f"<i>Дождался репликации, {прошло:.0f} мин.</i>\n\n"
+          f"<b>Блюдо готово:</b> карточка, техкарта, цена.")
+    return None
+
+
 def цена_новому(chat, c, who):
     """Приказ о цене для только что заведённого блюда.
 
@@ -3658,6 +3709,25 @@ def цена_новому(chat, c, who):
     строка = {"pid": товар["id"], "dep": cappi.отдел(), "price": float(цена),
               "название": товар["name"], "было": None,
               "код": товар.get("num")}
+    # Карточка создаётся в сети, а цена ставится на точке — и между ними
+    # проходит репликация. Сразу после создания точка о позиции ещё не
+    # знает и отвечает PRODUCT_MISSED. Это не ошибка, это «подожди».
+    if not _есть_на_точке(товар["id"]):
+        with _очередь:
+            items = load_pending()
+            items.append({"code": товар.get("num"), "name": товар["name"],
+                          "price": float(цена), "old": None, "chat": chat,
+                          "date": когда.isoformat(), "guid": товар["id"],
+                          "doc": "—", "stage": "новая_цена", "сс": c.get("сс"),
+                          "user": who,
+                          "due": (datetime.now()
+                                  + timedelta(minutes=3)).isoformat()})
+            save_pending(items)
+        return say(chat, f"⏳ <b>{товар['name']}</b> уже в сети, но на точку "
+                         f"ещё не доехало.\n\n"
+                         f"<i>Номенклатура реплицируется несколько минут. "
+                         f"Поставлю цену {fmt(цена)} ₴ сам, как только "
+                         f"позиция появится, и напишу.</i>")
     try:
         with cappi.Syrve() as s:
             doc = s.set_prices([строка], когда.isoformat())
