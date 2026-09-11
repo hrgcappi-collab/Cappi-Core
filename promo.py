@@ -20,6 +20,7 @@ import os
 from datetime import timedelta
 
 import cappi
+import report
 
 ФАЙЛ = os.path.expanduser("~/.cappi/special.json")
 
@@ -105,7 +106,8 @@ def продажи(s, day, коды=None):
         "filters": {"OpenDate.Typed": {
             "filterType": "DateRange", "periodType": "CUSTOM",
             "from": day.isoformat(),
-            "to": (day + timedelta(days=1)).isoformat()}},
+            "to": (day + timedelta(days=1)).isoformat()},
+            **report.НАШ_ОТДЕЛ()},
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
     out = {}

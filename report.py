@@ -223,6 +223,15 @@ def месячный_план(day):
 # таблице Syrve, по которой сверяются. Без этого фильтра за 09.09 выходило
 # 458 блюд вместо 406: в счёт попадало всё, что успели пробить и удалить.
 # На выручку не влияет — у удалённого она и так ноль.
+# Подразделение. В базе их два, но продаёт только «Cappi Одесса»: у
+# «Cappi Днепр» ноль заказов за всю историю. Фильтр стоит не ради цифр —
+# они и так сходятся, — а чтобы чужое подразделение не могло однажды
+# просочиться в выручку, KPI и проценты кухни.
+def НАШ_ОТДЕЛ():
+    return {"Department.Id": {"filterType": "IncludeValues",
+                              "values": [cappi.отдел()]}}
+
+
 НЕ_УДАЛЁННЫЕ = {
     "DeletedWithWriteoff": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
     "OrderDeleted": {"filterType": "IncludeValues", "values": ["NOT_DELETED"]},
@@ -247,6 +256,7 @@ def _olap(s, day, group, aggregate, extra_filters=None, колонки=None):
             "OpenDate.Typed": {"filterType": "DateRange", "periodType": "CUSTOM",
                                "from": day.isoformat(),
                                "to": (day + timedelta(days=1)).isoformat()},
+            **НАШ_ОТДЕЛ(),
             **(extra_filters or {}),
         },
     }
@@ -261,7 +271,7 @@ def orders_count(s, day):
     попадёт в оба типа и посчитается дважды — за 09.09 так получалось 330
     вместо 208. Спрашиваем без разбивки, тогда Syrve считает уникальные.
     """
-    rows = _olap(s, day, [], ["UniqOrderId"], {**НЕ_УДАЛЁННЫЕ, **ЕДА})
+    rows = _olap(s, day, [], ["UniqOrderId"], {**НАШ_ОТДЕЛ(), **НЕ_УДАЛЁННЫЕ, **ЕДА})
     return sum(r.get("UniqOrderId", 0) or 0 for r in rows)
 
 
@@ -305,7 +315,7 @@ def by_category(s, day):
     """
     rows = _olap(s, day, ["DishType", "DishCategory"],
                  ["UniqOrderId", "DishAmountInt"],
-                 {**НЕ_УДАЛЁННЫЕ, **ЕДА}, колонки=["Conception"])
+                 {**НАШ_ОТДЕЛ(), **НЕ_УДАЛЁННЫЕ, **ЕДА}, колонки=["Conception"])
     out = {}
     for r in rows:
         тип = r.get("DishType") or "—"
@@ -343,7 +353,8 @@ def month_to_date(s, day):
             "filters": {"OpenDate.Typed": {
                 "filterType": "DateRange", "periodType": "CUSTOM",
                 "from": первое.isoformat(),
-                "to": (day + timedelta(days=1)).isoformat()}}}
+                "to": (day + timedelta(days=1)).isoformat()},
+                **НАШ_ОТДЕЛ()}}
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
     return sum(row.get("DishDiscountSumInt", 0) or 0 for row in r.get("data", []))
 
@@ -789,7 +800,7 @@ def заказы_с_негодой(s, day=None):
             "OpenDate.Typed": {"filterType": "DateRange", "periodType": "CUSTOM",
                                "from": day.isoformat(),
                                "to": (day + timedelta(days=1)).isoformat()},
-            **НЕ_УДАЛЁННЫЕ,
+            **НАШ_ОТДЕЛ(), **НЕ_УДАЛЁННЫЕ,
         },
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
@@ -856,10 +867,11 @@ def негода_сейчас(s, day=None, окно_минут=60):
 
 # Только блюда и только неудалённые заказы: удалённый заказ никто не готовил,
 # а товар со склада не проходит через кухню и занижал бы её время.
-ТОЛЬКО_БЛЮДА = {
-    **НЕ_УДАЛЁННЫЕ,
-    "DishType": {"filterType": "IncludeValues", "values": ["DISH"]},
-}
+def ТОЛЬКО_БЛЮДА():
+    """Функция, а не константа: отдел читается из конфига, и трогать его
+    на импорте значит ронять бот при старте вместо понятного отказа."""
+    return {**НАШ_ОТДЕЛ(), **НЕ_УДАЛЁННЫЕ,
+            "DishType": {"filterType": "IncludeValues", "values": ["DISH"]}}
 
 
 def цель(что, филиал):
@@ -877,7 +889,7 @@ def _время_olap(s, с, по, поля):
             "OpenDate.Typed": {"filterType": "DateRange", "periodType": "CUSTOM",
                                "from": с.isoformat(),
                                "to": (по + timedelta(days=1)).isoformat()},
-            **ТОЛЬКО_БЛЮДА,
+            **ТОЛЬКО_БЛЮДА(),
         },
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",

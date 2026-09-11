@@ -134,12 +134,22 @@ def _месяц(day):
 # ------------------------------------------------------------------ из Syrve
 def _olap(s, тип, поля, агрегаты, с, по, фильтры=None):
     поле_даты = "OpenDate.Typed" if тип == "SALES" else "DateTime.DateTyped"
+    # Подразделение: в продажах есть Department.Id, в проводках — только
+    # название. «Cappi Днепр» не наш, и в расчёт премий он попасть не должен
+    # ни при каких обстоятельствах.
+    if тип == "SALES":
+        свои = {"Department.Id": {"filterType": "IncludeValues",
+                                  "values": [cappi.отдел()]}}
+    else:
+        имя = cappi.отдел_имя()
+        свои = ({"Department": {"filterType": "IncludeValues", "values": [имя]}}
+                if имя else {})
     body = {"reportType": тип, "buildSummary": False,
             "groupByRowFields": поля, "aggregateFields": агрегаты,
             "filters": {поле_даты: {"filterType": "DateRange",
                                     "periodType": "CUSTOM",
                                     "from": с.isoformat(), "to": по.isoformat()},
-                        **(фильтры or {})}}
+                        **свои, **(фильтры or {})}}
     return cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
                        body, timeout=240).get("data", [])
 
