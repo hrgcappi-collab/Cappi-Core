@@ -5,6 +5,7 @@
 Конфиг:  ~/.cappi/api.env  (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS)
 """
 import html, json, os, re, sys, threading, time, traceback, urllib.parse, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 
@@ -149,14 +150,40 @@ def развернуть(ключ, сколько=2):
     return части
 
 
+def э(текст):
+    """Чужой текст в HTML-сообщение только через это.
+
+    Названия из Syrve, комментарии из Loopa и то, что набрал человек,
+    вставлялись как есть. В номенклатуре есть «Glovo <800», и любое
+    «цена < 50» от человека — Telegram отвечает отказом, человек видит
+    «Сломалось». Одно место экранирования вместо двадцати семи.
+    """
+    return html.escape(str(текст if текст is not None else ""), quote=False)
+
+
+ПРЕДЕЛ_TELEGRAM = 4000        # официальный 4096, оставляем запас на теги
+
+
 def say(chat, text, inline=None, keys=True):
     markup = None
     if inline:
         markup = {"inline_keyboard": inline}
     elif keys:
         markup = keyboard(chat)
-    return tg("sendMessage", chat_id=chat, text=text,
-              parse_mode="HTML", reply_markup=markup)
+    # Telegram отказывает сообщению длиннее 4096 символов целиком — и
+    # человек не получает ничего. Режем по строкам; кнопки — к последнему.
+    куски, текущий = [], ""
+    for строка in text.split("\n"):
+        if len(текущий) + len(строка) + 1 > ПРЕДЕЛ_TELEGRAM and текущий:
+            куски.append(текущий)
+            текущий = ""
+        текущий += ("\n" if текущий else "") + строка
+    куски.append(текущий)
+    ответ = None
+    for i, кусок in enumerate(куски):
+        ответ = tg("sendMessage", chat_id=chat, text=кусок, parse_mode="HTML",
+                   reply_markup=markup if i == len(куски) - 1 else None)
+    return ответ
 
 
 # -------------------------------------------------------------------- служебное
@@ -338,7 +365,7 @@ def помощь(chat):
 
 def screen_item(chat, code, p):
     """Карточка позиции с кнопками действий."""
-    txt = (f"<b>{p['name']}</b>\n"
+    txt = (f"<b>{э(p['name'])}</b>\n"
            f"артикул <code>{code}</code>\n\n"
            f"в Syrve: <b>{fmt(p['price'])} ₴</b>")
     if p["next"] is not None:
@@ -373,7 +400,7 @@ def cmd_price(chat, query):
         if re.fullmatch(r"\d{3,}", query.strip()):
             return say(chat, f"Артикула <b>{query.strip()}</b> в меню нет.\n"
                              f"<i>Проверь номер или найди позицию по названию.</i>")
-        return say(chat, f"Не нашёл: <b>{query}</b>")
+        return say(chat, f"Не нашёл: <b>{э(query)}</b>")
     if len(hits) == 1:
         return screen_item(chat, *hits[0])
     if len(hits) > 20:
@@ -549,7 +576,7 @@ def cmd_healthcheck(chat):
     say(chat, "Проверяю все подключения…")
     import subprocess
     r = subprocess.run([sys.executable, os.path.join(HERE, "healthcheck.py")],
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=60)
     say(chat, "<pre>" + (r.stdout or r.stderr)[-3500:] + "</pre>")
 
 
@@ -692,10 +719,10 @@ def prepare(chat, code, new_price, when, user, несмотря=False):
         куда = "дороже" if new_price > old else "дешевле"
         тк = f"J{int(time.time())}{chat % 1000}"
         with _lock:
-            _confirm[тк] = {"скачок": True, "code": code, "price": new_price,
+            _confirm[тк] = {"создан": time.time(), "скачок": True, "code": code, "price": new_price,
                             "date": when.isoformat(), "chat": chat, "user": user}
         return say(chat,
-                   f"⚠️ <b>{p['name']}</b>\n"
+                   f"⚠️ <b>{э(p['name'])}</b>\n"
                    f"<b>{fmt(old)} → {fmt(new_price)} ₴</b> — "
                    f"на {скачок:.0f}% {куда}\n\n"
                    f"Это больше порога в {MAX_CHANGE_PCT}%, который стоит "
@@ -716,7 +743,7 @@ def prepare(chat, code, new_price, when, user, несмотря=False):
 
     tok = f"{int(time.time())}{chat % 1000}"
     with _lock:
-        _confirm[tok] = {"pid": pid, "dep": dep, "price": new_price,
+        _confirm[tok] = {"создан": time.time(), "pid": pid, "dep": dep, "price": new_price,
                          "date": when.isoformat(), "code": code, "name": p["name"],
                          "old": cur, "chat": chat, "user": user}
     сегодня = when == date.today()
@@ -725,7 +752,7 @@ def prepare(chat, code, new_price, when, user, несмотря=False):
              if сегодня else
              f"ночью с {date.today():%d.%m} на {when:%d.%m}, около 3:00")
     say(chat,
-        f"<b>{p['name']}</b>\nартикул <code>{code}</code>\n\n"
+        f"<b>{э(p['name'])}</b>\nартикул <code>{code}</code>\n\n"
         f"<b>{fmt(cur)} ₴  →  {fmt(new_price)} ₴</b>\n"
         f"{когда}",
         inline=[
@@ -854,7 +881,7 @@ def cmd_price_list(chat, текст, who):
 
     tok = f"L{int(time.time())}{chat % 1000}"
     with _lock:
-        _confirm[tok] = {"строки": нашёл, "скачки": скачки,
+        _confirm[tok] = {"создан": time.time(), "строки": нашёл, "скачки": скачки,
                          "date": когда.isoformat(), "chat": chat, "user": who}
 
     текст_ = [f"<b>Прейскурант: {len(нашёл)} позиций</b>", ""]
@@ -968,13 +995,13 @@ def _check_planned(it):
     when_h = datetime.fromisoformat(it["date"]).strftime("%d.%m")
     if ok:
         say(it["chat"],
-            f"✅ Приказ принят и стоит в очереди\n\n<b>{it['name']}</b>\n"
+            f"✅ Приказ принят и стоит в очереди\n\n<b>{э(it['name'])}</b>\n"
             f"приказ №{it['doc']}, {fmt(it['old'])} → {fmt(it['price'])} ₴\n"
             f"сменится ночью, {when_h} около 3:00\n\n"
             f"<i>Проверю сайт и Glovo утром {when_h}.</i>")
     else:
         say(it["chat"],
-            f"⚠️ <b>Цена на {when_h} не встала</b>\n\n<b>{it['name']}</b>\n"
+            f"⚠️ <b>Цена на {when_h} не встала</b>\n\n<b>{э(it['name'])}</b>\n"
             f"приказ №{it['doc']} создан, но на {when_h} Syrve отдаёт "
             f"{f'{fmt(nxt)} ₴' if nxt is not None else 'пусто'}, "
             f"а должен {fmt(it['price'])} ₴.\n\n"
@@ -1012,7 +1039,7 @@ def _check_showcase(it):
     if сейчас and not доехало and прошло < ЖДЁМ_ВЫГРУЗКУ_МИН:
         if not it.get("ждём_с"):
             say(it["chat"],
-                f"⏳ <b>{it['name']}</b> — приказ проведён, жду выгрузку.\n"
+                f"⏳ <b>{э(it['name'])}</b> — приказ проведён, жду выгрузку.\n"
                 f"<i>Она идёт раз в 20 минут. Проверяю каждые "
                 f"{БЫСТРАЯ_ПРОВЕРКА_МИН} минуты и напишу, как только цена "
                 f"встанет на сайте.</i>")
@@ -1030,7 +1057,7 @@ def _check_showcase(it):
     say(it["chat"],
         ("✅ Цена доехала везде" if ok_site and ok_glovo
          else "⚠️ Цена доехала не везде")
-        + f"\n\n<b>{it['name']}</b>\n"
+        + f"\n\n<b>{э(it['name'])}</b>\n"
           f"приказ №{it['doc']}, {fmt(it['old'])} → {fmt(p)} ₴\n\n"
           f"сайт:  {mark(ok_site, site)}\n"
           f"Glovo: {mark(ok_glovo, glovo)}"
@@ -1839,7 +1866,7 @@ def on_button(q):
             return say(chat, "Позиция пропала из меню.")
         _, p = hits[0]
         _await[chat] = {"what": "price", "code": arg}
-        return say(chat, f"<b>{p['name']}</b>\nсейчас <b>{fmt(p['price'])} ₴</b>\n\n"
+        return say(chat, f"<b>{э(p['name'])}</b>\nсейчас <b>{fmt(p['price'])} ₴</b>\n\n"
                          f"Напиши новую цену числом.")
 
     if act == "sh":                                   # «где показывается»
@@ -1850,7 +1877,7 @@ def on_button(q):
         say(chat, "Смотрю витрины…")
         s, g = where_shown(p["id"], p["name"])
         m = lambda v: fmt(v) if v is not None else "не нашёл"
-        return say(chat, f"<b>{p['name']}</b>\n\n"
+        return say(chat, f"<b>{э(p['name'])}</b>\n\n"
                          f"Syrve:  <b>{fmt(p['price'])} ₴</b>\n"
                          f"сайт:   {m(s)}\nGlovo:  {m(g)}")
 
@@ -1860,6 +1887,18 @@ def on_button(q):
         return say(chat, "Кнопка устарела — открой экран заново.\n"
                          "<i>Бот помнит подтверждения недолго, чтобы вчерашнее "
                          "нажатие не поменяло сегодняшнюю цену.</i>")
+    # Карточка живёт полчаса. Нажатая через неделю она провела бы приказ
+    # датой недельной давности — дата берётся из токена как есть.
+    if time.time() - c.get("создан", time.time()) > 1800:
+        return say(chat, "Карточка устарела — прошло больше получаса. "
+                         "Начни заново: цены могли измениться.")
+    if c.get("date") and c["date"] < date.today().isoformat():
+        return say(chat, f"Дата в карточке уже прошла ({c['date']}). Начни заново.")
+    # Права — при выполнении, а не только при подготовке: роль могли
+    # отобрать между двумя нажатиями.
+    if act in ("go", "gl", "gv", "gj", "ld", "dt", "нб", "нц", "тк") \
+            and not access.можно(chat, "цены"):
+        return say(chat, "У тебя больше нет права менять цены.")
 
     if act == "no":
         return say(chat, "Отменено, ничего не менял.")
@@ -2070,12 +2109,12 @@ def cmd_complaints(chat, day=None):
                          + (f" Отзывов всего {ж['отзывов']}." if ж["отзывов"] else ""))
     строки = [f"😠 <b>Жалоб за {day:%d.%m}: {ж['жалоб']}</b>"
               + (f" из {ж['отзывов']} отзывов" if ж["отзывов"] else ""), ""]
-    if ж["срочность"]:
-        строки.append("по срочности: " + ", ".join(
-            f"{s} {n}" for s, n in sorted(ж["срочность"].items(), key=lambda x: -x[1])))
+    крит = ж["срочность"].get("critical", 0) + ж["срочность"].get("high", 0)
+    if крит:
+        строки.append(f"<b>срочных: {крит}</b>")
     if ж["по_поводам"]:
         строки += ["", "<b>Поводы</b>"]
-        строки += [f"    {report.ПОВОДЫ.get(p, p)} — {n}"
+        строки += [f"    {report.повод_по_русски(p)} — {n}"
                    for p, n in sorted(ж["по_поводам"].items(), key=lambda x: -x[1])]
     if ж["по_точкам"]:
         строки += ["", "<b>По точкам</b>"]
@@ -2112,10 +2151,16 @@ def cmd_zones(chat, day=None):
 def cmd_live(chat):
     """Только живые заказы — без остального отчёта, когда спрашивают про них."""
     ж = report.live_orders()
-    строки = [f"🚚 <b>В работе: {ж['в_работе']}</b> из {ж['всего']} за сегодня", ""]
+    if not ж["в_работе"]:
+        return say(chat, "🚚 Сейчас в работе ничего нет.")
+    строки = [f"🚚 <b>В работе: {ж['в_работе']}</b> на "
+              f"<b>{report.money(ж.get('сумма_в_работе', 0))} ₴</b>", ""]
     for st, n in sorted(ж["статусы"].items(), key=lambda x: -x[1]):
+        if st not in report.В_РАБОТЕ:
+            continue
+        сумма = (ж.get("суммы") or {}).get(st) or 0
         строки.append(f"    {report.статус(st)} — {n}"
-                      + ("  ←" if st in report.В_РАБОТЕ else ""))
+                      + (f" · {report.money(сумма)} ₴" if сумма else ""))
     say(chat, "\n".join(строки))
 
 
@@ -2128,10 +2173,16 @@ def cmd_cancels(chat, day=None):
     строки = [f"❌ <b>Отмен {когда}: {sum(от.values())}</b>"]
     строки += [f"    {п} — {n}" for п, n in sorted(от.items(), key=lambda x: -x[1])]
     if уд:
-        строки += ["", f"🗑 <b>Удалено блюд: {sum(v['штук'] for v in уд.values()):.0f}</b>"]
+        всего = sum(v["штук"] for v in уд.values())
+        зак = sum(v.get("заказов", 0) for v in уд.values())
+        строки += ["", f"🗑 <b>Удалено: {всего:.0f}</b> "
+                       f"{report.счёт(всего, 'блюдо', 'блюда', 'блюд').split(' ', 1)[1]} "
+                       f"в {report.счёт(зак, 'заказе', 'заказах', 'заказах')}"]
         for п, v in sorted(уд.items(), key=lambda x: -x[1]["штук"]):
-            деньги = f", {report.money(v['сумма'])} ₴" if v["сумма"] else ""
-            строки.append(f"    {п} — {v['штук']:.0f}{деньги}")
+            деньги = f" · {report.money(v['сумма'])} ₴" if v["сумма"] else ""
+            строки.append(f"    {э(п)} — {v['штук']:.0f} шт в {v.get('заказов', 0)} зак{деньги}")
+            for к, n in sorted((v.get("комментарии") or {}).items(), key=lambda x: -x[1])[:3]:
+                строки.append(f"        <i>«{э(к[:52])}»{f' ×{n}' if n > 1 else ''}</i>")
     say(chat, "\n".join(строки))
 
 
@@ -2240,7 +2291,7 @@ def cmd_jam_state(chat):
             зоны = jamshut.справочник_зон()
         except Exception:
             зоны = {}
-        for z in st.get("closed", []):
+        for z in jamshut.закрытые():
             имя = (зоны.get(z) or {}).get("name", f"зона {z}")
             район = (зоны.get(z) or {}).get("district", "")
             строки.append(f"    {имя}" + (f" · {район}" if район else ""))
@@ -2254,7 +2305,7 @@ def cmd_jam_close(chat):
         return say(chat, "Управлять зонами может оператор или админ.")
     try:
         зоны = jamshut.справочник_зон()
-        закрыты = set(jamshut.состояние().get("closed") or [])
+        закрыты = set(jamshut.закрытые())
     except Exception as e:
         return say(chat, f"Джамшут не отвечает: {str(e)[:120]}")
     свободные = [(i, z) for i, z in sorted(зоны.items()) if i not in закрыты]
@@ -2271,7 +2322,7 @@ def cmd_jam_open(chat):
         return say(chat, "Управлять зонами может оператор или админ.")
     try:
         зоны = jamshut.справочник_зон()
-        закрыты = list(jamshut.состояние().get("closed") or [])
+        закрыты = jamshut.закрытые()
     except Exception as e:
         return say(chat, f"Джамшут не отвечает: {str(e)[:120]}")
     if not закрыты:
@@ -2344,11 +2395,13 @@ def cmd_jam_health(chat):
         строки.append(f"не отвечает ❌ — {str(e)[:90]}")
     адрес, _ = jamshut._база()
     строки += [f"адрес: <code>{адрес}</code>", "",
-               "<b>Что доступно</b>",
-               "  ✅ состояние зон, история событий",
-               "  ❌ управление — ручек нет, только чтение", "",
-               "<i>Джамшут не имеет доступа к Core: ни адреса, ни токена. "
-               "Связь односторонняя.</i>"]
+               "<b>Что умеет</b>",
+               "  ✅ состояние зон, история",
+               "  " + ("✅ закрыть и открыть зону"
+                       if jamshut.можно_управлять() else
+                       "❌ закрыть/открыть — нет ключа на запись"),
+               "  " + ("✅ непогода" if jamshut.умеет("/weather/state")
+                       else "❌ непогода — ручки на его стороне пока нет")]
     say(chat, "\n".join(строки))
 
 
@@ -2799,6 +2852,15 @@ def сохранить_тайники(chat, разобрано, месяц=None)
     Была вызвана из двух мест и нигде не определена — бот падал ровно на
     том пути, ради которого всё делалось: маркетолог пишет «Лазарева 5/4».
     """
+    # Та же проверка, что в кнопочном вводе. Через текст «Лазарева 1/2»
+    # записалось «2 из 1 = 200%» — цифра, от которой зависит премия.
+    плохие = {т: v for т, v in разобрано.items()
+              if v["всего"] <= 0 or v["пройдено"] > v["всего"]}
+    if плохие:
+        т, v = next(iter(плохие.items()))
+        return say(chat, f"Не запишу: {т} — пройдено {v['пройдено']} из "
+                         f"{v['всего']}.\n<i>Первым пишется, сколько тайников "
+                         f"было, вторым — сколько пройдено: «Лазарева 5/4».</i>")
     d = kpi.тайники(месяц) or {}
     d.update(разобрано)
     kpi.тайники(месяц, d)
@@ -2851,7 +2913,9 @@ def cmd_secret(chat, args=None):
         if внесено:
             всего = sum(v.get("всего", 0) for v in внесено.values())
             пройдено = sum(v.get("пройдено", 0) for v in внесено.values())
-            доля = f" — <b>{пройдено / всего * 100:.0f}%</b>" if всего else ""
+            криво = any(v.get("пройдено", 0) > v.get("всего", 0) for v in внесено.values())
+            доля = (" — <b>⚠️ введено неверно, переввести</b>" if криво else
+                    f" — <b>{пройдено / всего * 100:.0f}%</b>" if всего else "")
             строки.append(f"<b>{подпись}</b>{доля}")
             for т in ТОЧКИ_ТАЙНИКА:
                 v = внесено.get(т)
@@ -2952,12 +3016,20 @@ def cmd_shift_edits(chat, дней=7):
     через несколько часов меняет оплачиваемые часы задним числом.
     """
     say(chat, f"Смотрю явки за {дней} дней…")
-    найдено = []
+    найдено, виденные = [], set()
     with cappi.Syrve() as s:
+        имена = report._справочник(s, "employees", "employee")
         for i in range(дней):
             d = date.today() - timedelta(days=i)
             try:
-                найдено += [(d, p) for p in report.attendance(s, d)["правки"]]
+                for p in report.attendance(s, d)["правки"]:
+                    ключ = (p["кто"], p["смена"], round(p["через"]))
+                    if ключ in виденные:
+                        continue          # одна правка не должна светиться дважды
+                    виденные.add(ключ)
+                    # Редактора API отдаёт GUID-ом; человеку нужно имя.
+                    p["правил"] = имена.get(p["правил"], p["правил"])
+                    найдено.append((d, p))
             except Exception:
                 continue
     if not найдено:
@@ -3303,7 +3375,7 @@ def cmd_сс(chat):
 def показать_сс(chat, запрос):
     кандидаты = nomenclature.найти(запрос, типы=("DISH", "PREPARED"))
     if not кандидаты:
-        return say(chat, f"Не нашёл «{запрос[:40]}» в номенклатуре.")
+        return say(chat, f"Не нашёл «{э(запрос[:40])}» в номенклатуре.")
     if len(кандидаты) > 1 and кандидаты[0][1] < 95 and (
             кандидаты[0][1] - кандидаты[1][1] < 15):
         return say(chat, "Уточни, какое именно:", inline=[
@@ -3323,7 +3395,7 @@ def _показать_сс(chat, товар):
         цена = (cappi.cloud_prices().get(str(товар.get("num"))) or {}).get("price")
     except Exception:
         pass
-    строки = [f"🧮 <b>{товар['name']}</b>",
+    строки = [f"🧮 <b>{э(товар['name'])}</b>",
               f"<i>артикул {товар.get('num')}</i>", ""]
     for с in r["строки"]:
         if с["сумма"] is None:
@@ -3407,10 +3479,14 @@ def показать_состав(chat, текст):
             строки.append(f"    {с['название'][:30]}\n"
                           f"        {с['кол']:.3f} × {грн(с['за_единицу'])} = "
                           f"<b>{грн(с['сумма'])} ₴</b>")
-    строки += ["", f"<b>Себестоимость: {грн(r['итого'])} ₴</b>", ""]
-    for ц in (r["итого"] * k for k in (3.0, 3.5, 4.0, 4.5)):
-        строки.append(f"    при цене {fmt(round(ц / 10) * 10)} ₴ — "
-                      f"фудкост {cost.фудкост(r['итого'], ц):.0f}%")
+    строки += ["", f"<b>Себестоимость: {грн(r['итого'])} ₴</b>"]
+    # Если ни у одного ингредиента нет цены, итог ноль — и прикидывать
+    # фудкост от нуля бессмысленно (а формат None-а ронял экран).
+    if r["итого"] > 0:
+        строки.append("")
+        for ц in (r["итого"] * k for k in (3.0, 3.5, 4.0, 4.5)):
+            строки.append(f"    при цене {fmt(round(ц / 10) * 10)} ₴ — "
+                          f"фудкост {cost.фудкост(r['итого'], ц):.0f}%")
     if мимо:
         строки += ["", f"<i>Не разобрал: {', '.join(мимо[:4])}</i>"]
     if r["дыры"]:
@@ -3455,7 +3531,7 @@ def блюдо_шаг(chat, текст, ждём):
             подсказка = ("\n\n<i>Похожее уже есть: "
                          + ", ".join(p["name"][:28] for p, _ in похожие)
                          + ". Если это оно — не заводи второе.</i>")
-        return say(chat, f"<b>{д['имя']}</b>\n\nВ какую группу?"
+        return say(chat, f"<b>{э(д['имя'])}</b>\n\nВ какую группу?"
                          f"\n<i>Напиши часть названия группы — «пицца», "
                          f"«роли», «напої».</i>{подсказка}")
 
@@ -3495,9 +3571,9 @@ def блюдо_шаг(chat, текст, ждём):
             return say(chat, "Напиши числом, в граммах.")
         tok = f"N{int(time.time())}{chat % 1000}"
         with _lock:
-            _confirm[tok] = {"блюдо": д, "chat": chat}
+            _confirm[tok] = {"создан": time.time(), "блюдо": д, "chat": chat}
         return say(chat,
-                   f"➕ <b>{д['имя']}</b>\n"
+                   f"➕ <b>{э(д['имя'])}</b>\n"
                    f"группа: {д['группа']['name']}\n"
                    f"цена: <b>{fmt(д['цена'])} ₴</b>\n"
                    f"выход: {д['выход'] * 1000:.0f} г\n\n"
@@ -3574,7 +3650,7 @@ def создать_блюдо(chat, c, who):
     nomenclature.всё(обновить=True)
     tok = f"T{int(time.time())}{chat % 1000}"
     with _lock:
-        _confirm[tok] = {"товар": созданное, "chat": chat}
+        _confirm[tok] = {"создан": time.time(), "товар": созданное, "chat": chat}
     say(chat, f"✅ <b>Карточка создана</b>\n"
               f"{созданное['name']}\n"
               f"артикул <code>{созданное.get('num')}</code> · "
@@ -3668,7 +3744,7 @@ def записать_техкарту(chat, текст, ждём, who="—"):
             цена_карточки = товар.get("defaultSalePrice") or 0
             tok = f"P{int(time.time())}{chat % 1000}"
             with _lock:
-                _confirm[tok] = {"товар": товар, "цена": цена_карточки,
+                _confirm[tok] = {"создан": time.time(), "товар": товар, "цена": цена_карточки,
                                  "сс": r["итого"], "chat": chat}
             строки += ["", "<b>Шаг 3 — цена.</b>",
                        f"<i>Пока приказа нет, блюдо не попадёт в прайс-лист "
@@ -3713,7 +3789,7 @@ def _ждать_позицию(it):
     if not _есть_на_точке(it["guid"]):
         if прошло > 90:
             say(it["chat"],
-                f"⚠️ <b>{it['name']}</b> так и не доехало на точку за полтора "
+                f"⚠️ <b>{э(it['name'])}</b> так и не доехало на точку за полтора "
                 f"часа — цену не поставил.\n"
                 f"<i>Проверь обмен между сетью и точкой в Syrve, потом "
                 f"поставь цену командой /set {it.get('code')} "
@@ -3768,7 +3844,7 @@ def цена_новому(chat, c, who):
                           "due": (datetime.now()
                                   + timedelta(minutes=3)).isoformat()})
             save_pending(items)
-        return say(chat, f"⏳ <b>{товар['name']}</b> уже в сети, но на точку "
+        return say(chat, f"⏳ <b>{э(товар['name'])}</b> уже в сети, но на точку "
                          f"ещё не доехало.\n\n"
                          f"<i>Номенклатура реплицируется несколько минут. "
                          f"Поставлю цену {fmt(цена)} ₴ сам, как только "
@@ -3887,6 +3963,9 @@ def on_message(m):
     who = m["from"].get("username") or str(uid)
 
     if text.lower() in BUTTONS:
+        # Нажал кнопку — значит передумал. Иначе незакрытый мастер съедал
+        # следующее сообщение: «окрошка» уходила в себестоимость вместо поиска.
+        _await.pop(chat, None)
         return BUTTONS[text.lower()](chat)
 
     # ждём ответа на заданный вопрос?
@@ -3911,7 +3990,7 @@ def on_message(m):
                 price = float(text.replace(",", ".").strip())
             except ValueError:
                 _await[chat] = st
-                return say(chat, f"Это не похоже на цену: <b>{text}</b>. Напиши числом.")
+                return say(chat, f"Это не похоже на цену: <b>{э(text)}</b>. Напиши числом.")
             return prepare(chat, st["code"], price, _default_date(), who)
 
     части = text.split()
@@ -3922,6 +4001,7 @@ def on_message(m):
     cmd, *args = части
     cmd = cmd.lower().split("@")[0]
     if cmd in ("/start", "/help"):
+        _await.pop(chat, None)
         _menu[chat] = "главное"
         помощь(chat)
     elif cmd == "/price":
@@ -3933,7 +4013,7 @@ def on_message(m):
     elif cmd in ("/report", "/итоги"):
         d = дата_из_текста(args[0]) if args else None
         if args and d is None:
-            return say(chat, f"Не понял дату: <b>{args[0]}</b>\n"
+            return say(chat, f"Не понял дату: <b>{э(args[0])}</b>\n"
                              f"<i>Например: <code>/report 2026-09-10</code> "
                              f"или <code>/report 10.09</code></i>")
         cmd_report(chat, d, live=not args)
@@ -3974,7 +4054,7 @@ def on_message(m):
         try:
             price = float(args[1].replace(",", "."))
         except ValueError:
-            return say(chat, f"Не понял цену: <b>{args[1]}</b>")
+            return say(chat, f"Не понял цену: <b>{э(args[1])}</b>")
         when = _default_date()
         if len(args) > 2:
             a = args[2].lower()
@@ -3988,7 +4068,7 @@ def on_message(m):
                 when = разобрана
         prepare(chat, args[0], price, when, who)
     elif text.startswith("/"):
-        say(chat, f"Не знаю команду <b>{cmd}</b>.\n"
+        say(chat, f"Не знаю команду <b>{э(cmd)}</b>.\n"
                   f"<i>Всё основное — кнопками снизу, список команд — /help.</i>")
     elif (разобрано := разобрать_тайники(text)) and access.можно(chat, "показатели"):
         # Марина пишет «Лазарева 5/4» без всякой команды — так и принимаем.
@@ -4026,7 +4106,7 @@ def on_message(m):
                          "по строке на позицию: «Название 46».</i>"
                          if len(text.splitlines()) > 1 else
                          "<i>Для поиска хватит куска названия или артикула.</i>")
-            return say(chat, f"Не понял: <b>{text[:60]}</b>\n{подсказка}\n"
+            return say(chat, f"Не понял: <b>{э(text[:60])}</b>\n{подсказка}\n"
                              f"<i>Записал в журнал — разберём.</i>")
         cmd_price(chat, text)
 
@@ -4065,30 +4145,74 @@ def main():
         try:
             for u in tg("getUpdates", offset=offset, timeout=50).get("result", []):
                 offset = u["update_id"] + 1
-                try:
-                    if "callback_query" in u:
-                        on_button(u["callback_query"])
-                    elif "message" in u:
-                        on_message(u["message"])
-                except Exception as e:
-                    traceback.print_exc()
-                    что = ((u.get("message") or {}).get("text")
-                           or (u.get("callback_query") or {}).get("data") or "?")
-                    кто = ((u.get("message") or u.get("callback_query")
-                            or {}).get("from") or {}).get("id")
-                    ид = bugs.сбой(f"на «{что[:40]}»", e, кто=кто)
-                    chat = ((u.get("message") or u.get("callback_query", {}).get("message")
-                             or {}).get("chat") or {}).get("id")
-                    if chat:
-                        # Человек должен понимать, что об этом уже знают, а не
-                        # гадать, дошло ли до кого-нибудь.
-                        say(chat, f"❌ Сломалось на «{что[:40]}».\n"
-                                  f"<i>Записал в журнал ошибок"
-                                  f"{f' — {ид}' if ид else ''}, разберём. "
-                                  f"Данные не пострадали.</i>")
+                # Раньше всё шло по очереди в одном потоке: пока один ждал
+                # «За вчера» (6 с), остальные ждали молча, а зависший запрос к
+                # Syrve делал бота мёртвым для всех. Теперь каждый чат — своя
+                # очередь, разные чаты — параллельно.
+                _обработать_в_потоке(u)
         except Exception:
             traceback.print_exc()
             time.sleep(5)
+
+
+_ПУЛ = ThreadPoolExecutor(max_workers=8, thread_name_prefix="чат")
+_ЗАМКИ_ЧАТОВ = {}
+_ЗАМКИ_ЧАТОВ_LOCK = threading.Lock()
+
+
+def _замок_чата(chat):
+    with _ЗАМКИ_ЧАТОВ_LOCK:
+        return _ЗАМКИ_ЧАТОВ.setdefault(chat, threading.Lock())
+
+
+def _обработать_в_потоке(u):
+    chat = ((u.get("message") or (u.get("callback_query") or {}).get("message")
+             or {}).get("chat") or {}).get("id")
+    _ПУЛ.submit(_обработать, u, chat)
+
+
+def _обработать(u, chat):
+    # Один чат — строго по порядку: иначе «Провести» может обогнать карточку.
+    замок = _замок_чата(chat) if chat is not None else threading.Lock()
+    with замок:
+        try:
+            if "callback_query" in u:
+                on_button(u["callback_query"])
+            elif "message" in u:
+                on_message(u["message"])
+        except Exception as e:
+            _сообщить_о_сбое(u, chat, e)
+
+
+def _сообщить_о_сбое(u, chat, e):
+    """Что сказать человеку, когда обработчик упал."""
+    traceback.print_exc()
+    что = ((u.get("message") or {}).get("text")
+           or (u.get("callback_query") or {}).get("data") or "?")
+    кто = ((u.get("message") or u.get("callback_query") or {}).get("from") or {}).get("id")
+    # Внешний сервис не ответил — это не наша поломка, и говорить
+    # «Сломалось» здесь нечестно: человеку нужно знать, кого ждать.
+    # В журнал — как «апи», не как падение.
+    if isinstance(e, cappi.ВнешнийСбой) or (
+            isinstance(e, RuntimeError) and str(e).startswith(("HTTP ", "ответ не JSON"))):
+        сервис = getattr(e, "сервис", "Syrve")
+        bugs.записать("апи", str(e)[:200], где=f"на «{что[:40]}»", кто=кто)
+        if chat:
+            try:
+                say(chat, f"⏳ {сервис} не отвечает. Попробуй через минуту.")
+            except Exception:
+                pass
+        return
+    ид = bugs.сбой(f"на «{что[:40]}»", e, кто=кто)
+    if chat:
+        try:
+            # Человек должен понимать, что об этом уже знают, а не гадать,
+            # дошло ли до кого-нибудь.
+            say(chat, f"❌ Сломалось на «{э(что[:40])}».\n"
+                      f"<i>Записал в журнал ошибок{f' — {ид}' if ид else ''}, "
+                      f"разберём. Данные не пострадали.</i>")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

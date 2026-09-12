@@ -54,7 +54,11 @@ def можно_управлять():
 
 def _get(path, timeout=30):
     адрес, _ = _база()
-    return json.loads(cappi._get(адрес + path, _заголовки(), timeout=timeout))
+    сырое = cappi._get(адрес + path, _заголовки(), timeout=timeout)
+    try:
+        return json.loads(сырое)
+    except (ValueError, TypeError):
+        raise cappi.ВнешнийСбой("Джамшут", f"{path}: ответ не JSON") from None
 
 
 def _post(path, тело, timeout=30):
@@ -73,18 +77,50 @@ def _post(path, тело, timeout=30):
 # ------------------------------------------------------------------ чтение
 def здоровье():
     адрес, _ = _база()
-    return json.loads(cappi._get(адрес + "/health", timeout=15))
+    try:
+        return cappi.форма(json.loads(cappi._get(адрес + "/health", timeout=15)),
+                           dict, "Джамшут")
+    except (ValueError, TypeError):
+        raise cappi.ВнешнийСбой("Джамшут", "/health: ответ не JSON") from None
 
 
 def состояние():
     """Какие зоны закрыты прямо сейчас."""
-    return _get("/zones/state")
+    return cappi.форма(_get("/zones/state"), dict, "Джамшут")
+
+
+def закрытые():
+    """Номера закрытых зон, в каком бы виде их ни отдали.
+
+    12.09.2026 экран зон падал с «unhashable type: dict»: в `closed`
+    приходят не номера, а объекты зон. Проверялось это всегда на пустом
+    списке — то есть падало ровно тогда, когда зоны действительно
+    закрыты, и только тогда.
+
+    Чужой формат менять не нам, а вот пережить его изменение — нам.
+    """
+    сырое = cappi.форма(состояние(), dict, "Джамшут").get("closed") or []
+    сырое = cappi.форма(сырое, list, "Джамшут")
+    номера = []
+    for з in сырое:
+        if isinstance(з, dict):
+            ид = з.get("id", з.get("zone_id", з.get("zoneId")))
+        else:
+            ид = з
+        try:
+            номера.append(int(ид))
+        except (TypeError, ValueError):
+            continue
+    return номера
 
 
 def события(с=None, по=None, лимит=1000):
     с = с or date.today()
     по = по or с
-    return _get(f"/zones/events?from={с}&to={по}&limit={лимит}", timeout=60).get("data", [])
+    r = cappi.форма(_get(f"/zones/events?from={с}&to={по}&limit={лимит}", timeout=60),
+                    dict, "Джамшут")
+    return [e for e in cappi.форма(r.get("data") or [], list, "Джамшут")
+            if isinstance(e, dict)]
 
 
 def история(дней=7):
@@ -210,5 +246,7 @@ def справочник_зон():
     Читается обычным токеном: это справочник, а не управление.
     """
     d = _get("/zones/list")
-    зоны = d if isinstance(d, list) else (d.get("data") or d.get("zones") or [])
-    return {z["id"]: z for z in зоны}
+    зоны = d if isinstance(d, list) else (cappi.форма(d, dict, "Джамшут").get("data")
+                                          or d.get("zones") or [])
+    return {z["id"]: z for z in cappi.форма(зоны, list, "Джамшут")
+            if isinstance(z, dict) and "id" in z}

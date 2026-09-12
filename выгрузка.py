@@ -60,8 +60,8 @@ def олап(s, поля, агрегаты, с, по, фильтры=None, ти�
                                     "periodType": "CUSTOM",
                                     "from": с.isoformat(), "to": по.isoformat()},
                         **report.НАШ_ОТДЕЛ(), **(фильтры or {})}}
-    return cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-                       body, timeout=300).get("data", [])
+    return cappi.олап(cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
+                       body, timeout=300))
 
 
 def заказы_глово(s, с, по):

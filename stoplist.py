@@ -21,8 +21,12 @@ import cappi
 
 def _token():
     c = cappi.cfg()
-    return cappi._post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
-                       {"apiLogin": c["SYRVE_CLOUD_API_KEY"]}, timeout=40)["token"]
+    r = cappi.форма(cappi._post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
+                                {"apiLogin": c["SYRVE_CLOUD_API_KEY"]}, timeout=40),
+                    dict, "Syrve Cloud")
+    if not r.get("token"):
+        raise cappi.ВнешнийСбой("Syrve Cloud", "не выдал токен")
+    return r["token"]
 
 
 def _post(path, body):
@@ -34,22 +38,31 @@ def _post(path, body):
 def терминалы():
     """id → название точки."""
     c = cappi.cfg()
-    d = _post("terminal_groups", {"organizationIds": [c["SYRVE_ORG_ID"]]})
+    d = cappi.форма(_post("terminal_groups", {"organizationIds": [c["SYRVE_ORG_ID"]]}),
+                    dict, "Syrve Cloud")
     return {it["id"]: it.get("name", "?")
-            for g in d.get("terminalGroups", []) for it in g.get("items", [])}
+            for g in (d.get("terminalGroups") or []) if isinstance(g, dict)
+            for it in (g.get("items") or []) if isinstance(it, dict) and "id" in it}
 
 
 def список():
     """Что сейчас в стопе: позиция, цена, точка."""
     c = cappi.cfg()
-    d = _post("stop_lists", {"organizationIds": [c["SYRVE_ORG_ID"]]})
-    меню = {p["id"]: p for p in cappi.cloud_menu()}
+    d = cappi.форма(_post("stop_lists", {"organizationIds": [c["SYRVE_ORG_ID"]]}),
+                    dict, "Syrve Cloud")
+    меню = {p["id"]: p for p in cappi.cloud_menu() if isinstance(p, dict) and "id" in p}
     точки = терминалы()
     out = []
-    for группа in d.get("terminalGroupStopLists", []):
-        for терминал in группа.get("items", []):
+    for группа in (d.get("terminalGroupStopLists") or []):
+        if not isinstance(группа, dict):
+            continue
+        for терминал in (группа.get("items") or []):
+            if not isinstance(терминал, dict):
+                continue
             tid = терминал.get("terminalGroupId")
-            for it in терминал.get("items", []):
+            for it in (терминал.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
                 pid = it.get("productId")
                 p = меню.get(pid) or {}
                 цена = ((p.get("sizePrices") or [{}])[0].get("price") or {}).get("currentPrice")

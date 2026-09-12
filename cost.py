@@ -20,7 +20,7 @@ Syrve показывает себестоимость в Office отдельно
 """
 import json
 import time
-from datetime import date
+from datetime import date, timedelta
 
 import cappi
 
@@ -50,20 +50,36 @@ def _данные(обновить=False):
     with cappi.Syrve() as s:
         карты = json.loads(cappi._get(
             f"{s.host}/resto/api/v2/assemblyCharts/getAll?key={s.key}"
-            f"&dateFrom={сегодня}&dateTo={сегодня}", timeout=150))["assemblyCharts"]
-        остатки = json.loads(cappi._get(
-            f"{s.host}/resto/api/v2/reports/balance/stores?key={s.key}"
-            f"&timestamp={сегодня}T00:00:00", timeout=90))
+            f"&dateFrom={сегодня}&dateTo={сегодня + timedelta(days=1)}",
+            timeout=60))["assemblyCharts"]
         товары = {p["id"]: p for p in s.products() if not p.get("deleted")}
-    поток = {}
-    for о in остатки:
-        if (о.get("amount") or 0) > 0:
-            c = поток.setdefault(о["product"], [0.0, 0.0])
-            c[0] += о["sum"]
-            c[1] += о["amount"]
+        # Цена единицы — сумма остатка на количество. Но остаток на 00:00
+        # бывает отрицательным (рис ушёл в −15 кг: списали больше, чем
+        # оприходовали) или нулевым — и позиция «теряла» цену, хотя цена у
+        # неё есть. Берём модуль, а если сегодня остатка нет вовсе —
+        # смотрим вчера, позавчера и неделю назад.
+        цена = {}
+        for дн in (0, 1, 2, 7):
+            t = (сегодня - timedelta(days=дн)).isoformat() + "T00:00:00"
+            остатки = json.loads(cappi._get(
+                f"{s.host}/resto/api/v2/reports/balance/stores?key={s.key}"
+                f"&timestamp={t}", timeout=90))
+            поток = {}
+            for о in остатки:
+                кол = о.get("amount") or 0
+                if abs(кол) < 0.001:
+                    continue
+                c = поток.setdefault(о["product"], [0.0, 0.0])
+                c[0] += о.get("sum") or 0
+                c[1] += кол
+            for k, v in поток.items():
+                if k not in цена and abs(v[1]) > 0.001 and v[0] * v[1] > 0:
+                    цена[k] = abs(v[0] / v[1])
+            if дн == 0:
+                сегодняшних = len(цена)
     _КЭШ.update({
         "когда": time.time(),
-        "цена": {k: v[0] / v[1] for k, v in поток.items() if v[1]},
+        "цена": цена,
         "карта": {a["assembledProductId"]: a for a in карты
                   if a.get("items") and a.get("dateTo") is None},
         "товары": товары,

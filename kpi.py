@@ -150,8 +150,8 @@ def _olap(s, тип, поля, агрегаты, с, по, фильтры=None):
                                     "periodType": "CUSTOM",
                                     "from": с.isoformat(), "to": по.isoformat()},
                         **свои, **(фильтры or {})}}
-    return cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-                       body, timeout=240).get("data", [])
+    return cappi.олап(cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
+                       body, timeout=60))
 
 
 def кухня(s, day):
@@ -340,7 +340,7 @@ def часы_кухни(s, day):
     с, по = _месяц(day)
     q = urllib.parse.urlencode({"from": с.isoformat(), "to": по.isoformat(),
                                 "key": s.key})
-    xml = cappi._get(f"{s.host}/resto/api/employees/attendance?{q}", timeout=150)
+    xml = cappi._get(f"{s.host}/resto/api/employees/attendance?{q}", timeout=60)
     имена = report._справочник(s, "employees", "employee")
     роли = report._справочник(s, "employees/roles", "role")
 
@@ -349,6 +349,11 @@ def часы_кухни(s, day):
     for x in ET.fromstring(xml).findall("attendance"):
         d1, d2 = x.findtext("dateFrom"), x.findtext("dateTo")
         if not (d1 and d2):
+            continue
+        # «to» у API включительный: в августовский пул попадали 196 часов
+        # первого сентября, и не «всем понемногу», а тем, кто в тот день
+        # работал, за счёт остальных.
+        if not (с.isoformat() <= d1[:10] < по.isoformat()):
             continue                     # смена ещё открыта
         роль = роли.get(x.findtext("roleId")) or "—"
         имя = имена.get(x.findtext("employeeId")) or \

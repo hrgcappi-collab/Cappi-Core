@@ -260,8 +260,8 @@ def _olap(s, day, group, aggregate, extra_filters=None, колонки=None):
             **(extra_filters or {}),
         },
     }
-    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
-    return r.get("data", [])
+    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=60)
+    return cappi.олап(r)
 
 
 def orders_count(s, day):
@@ -383,9 +383,9 @@ def выручка_пиу(s, с, по):
         },
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-                    body, timeout=200)
+                    body, timeout=60)
     точки, всего = {}, 0.0
-    for строка in r.get("data", []):
+    for строка in cappi.олап(r):
         сумма = (строка.get("Sum.Outgoing") or 0) - (строка.get("Sum.Incoming") or 0)
         всего += сумма
         имя = КОНЦЕПЦИИ.get(строка.get("Conception"))
@@ -405,8 +405,8 @@ def month_to_date(s, day):
                 "from": первое.isoformat(),
                 "to": (day + timedelta(days=1)).isoformat()},
                 **НАШ_ОТДЕЛ()}}
-    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
-    return sum(row.get("DishDiscountSumInt", 0) or 0 for row in r.get("data", []))
+    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=60)
+    return sum(row.get("DishDiscountSumInt", 0) or 0 for row in cappi.олап(r))
 
 
 def cancels(s, day):
@@ -516,10 +516,15 @@ def attendance(s, day):
 
     по_ролям, правки, всего_часов = {}, [], 0.0
     люди = {}
-    for a in ET.fromstring(xml).findall("attendance"):
+    for a in _xml(xml, "явки").findall("attendance"):
         d1, d2 = a.findtext("dateFrom"), a.findtext("dateTo")
         if not (d1 and d2):
             continue                      # смена ещё открыта
+        # API отдаёт записи включительно по «to»: спросив 11.09–12.09,
+        # получаем оба дня. «Смена вчера» показывала 49 человек и 517 часов
+        # вместо 25 и 251 — и выручку на час вдвое ниже настоящей.
+        if d1[:10] != day.isoformat():
+            continue
         часов = (datetime.fromisoformat(d2)
                  - datetime.fromisoformat(d1)).total_seconds() / 3600
         всего_часов += часов
@@ -574,6 +579,14 @@ _КЭШ = {}
 _КЭШ_ЖИВЁТ = 1800
 
 
+def _xml(текст, что):
+    """Разбор XML от Syrve: не-XML (HTML шлюза, пустота) — внешний сбой."""
+    try:
+        return ET.fromstring(текст or "")
+    except (ET.ParseError, TypeError):
+        raise cappi.ВнешнийСбой("Syrve", f"{что}: ответ не XML") from None
+
+
 def _справочник(s, путь, тег):
     ключ = (s.host, путь)
     свежий = _КЭШ.get(ключ)
@@ -581,7 +594,7 @@ def _справочник(s, путь, тег):
         return свежий[1]
     try:
         xml = cappi._get(f"{s.host}/resto/api/{путь}?key={s.key}", timeout=90)
-        d = {x.findtext("id"): x.findtext("name") for x in ET.fromstring(xml).iter(тег)}
+        d = {x.findtext("id"): x.findtext("name") for x in _xml(xml, путь).iter(тег)}
     except Exception:
         return (свежий or (0, {}))[1]      # лучше устаревшее, чем пустое
     _КЭШ[ключ] = (time.time(), d)
@@ -599,9 +612,13 @@ def _loopa(**params):
     if not c.get("LOOPA_TOKEN"):
         return None
     q = "&".join(f"{k}={v}" for k, v in params.items())
-    return json.loads(cappi._get(
-        f"{c['LOOPA_URL'].rstrip('/')}/metrics/reviews?{q}",
-        {"Authorization": f"Bearer {c['LOOPA_TOKEN']}"}, timeout=40))
+    try:
+        r = json.loads(cappi._get(
+            f"{c['LOOPA_URL'].rstrip('/')}/metrics/reviews?{q}",
+            {"Authorization": f"Bearer {c['LOOPA_TOKEN']}"}, timeout=40))
+    except ValueError:
+        raise cappi.ВнешнийСбой("Loopa", "ответ не JSON") from None
+    return cappi.форма(r, dict, "Loopa")
 
 
 def complaints(day, разрез="category"):
@@ -629,16 +646,21 @@ def live_orders(day=None):
     """Статусы заказов доставки за день — то, что происходит прямо сейчас."""
     day = day or date.today()
     c = cappi.cfg()
-    tok = cappi._post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
-                      {"apiLogin": c["SYRVE_CLOUD_API_KEY"]}, timeout=40)["token"]
+    tok = cappi.форма(cappi._post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
+                                  {"apiLogin": c["SYRVE_CLOUD_API_KEY"]}, timeout=40),
+                      dict, "Syrve Cloud").get("token")
+    if not tok:
+        raise cappi.ВнешнийСбой("Syrve Cloud", "не выдал токен")
     r = cappi._post(
         f"{c['SYRVE_CLOUD_URL']}/api/1/deliveries/by_delivery_date_and_status",
         {"organizationIds": [c["SYRVE_ORG_ID"]],
          "deliveryDateFrom": f"{day} 00:00:00.000",
          "deliveryDateTo": f"{day + timedelta(days=1)} 00:00:00.000"},
         {"Authorization": f"Bearer {tok}"}, timeout=90)
-    orders = [o.get("order", {}) for g in r.get("ordersByOrganizations", [])
-              for o in g.get("orders", [])]
+    r = cappi.форма(r, dict, "Syrve Cloud")
+    orders = [o.get("order") or {} for g in (r.get("ordersByOrganizations") or [])
+              if isinstance(g, dict)
+              for o in (g.get("orders") or []) if isinstance(o, dict)]
     статусы = Counter(o.get("status") for o in orders)
     # Суммы по статусам: «31 заказ в работе» и «31 заказ в работе на
     # 42 тысячи» — разные сообщения. Второе говорит, сколько денег ещё не
@@ -695,6 +717,12 @@ def collect(day=None):
             for имя, значение in пул.map(lambda з: безопасно(з[0], з[1]), задачи):
                 d[имя] = значение
 
+    # Без продаж и выручки отчёта нет — это не «часть данных недоступна»,
+    # а «Syrve не отвечает», и сказать надо именно это, а не рисовать
+    # отчёт с дырами или падать на KeyError.
+    for ключ in ("продажи", "выручка"):
+        if isinstance(d.get(ключ), dict) and "ошибка" in d[ключ]:
+            raise cappi.ВнешнийСбой("Syrve", d[ключ]["ошибка"])
     d["зоны"] = webhook.zones_summary(day)
     d["план"], d["план_точки"], d["план_откуда"] = plan_for(day)
     d["месяц_план"], d["месяц_всего"] = месячный_план(day)
@@ -975,9 +1003,9 @@ def заказы_с_негодой(s, day=None):
         },
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-                    body, timeout=180)
+                    body, timeout=60)
     заказы = {}
-    for строка in r.get("data", []):
+    for строка in cappi.олап(r):
         номер = строка.get("OrderNum")
         з = заказы.setdefault(номер, {
             "номер": номер, "время": строка.get("OpenTime") or "",
@@ -1064,8 +1092,8 @@ def _время_olap(s, с, по, поля):
         },
     }
     r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-                    body, timeout=180)
-    return r.get("data", [])
+                    body, timeout=60)
+    return cappi.олап(r)
 
 
 def _строка_времени(r):

@@ -109,9 +109,9 @@ def продажи(s, day, коды=None):
             "to": (day + timedelta(days=1)).isoformat()},
             **report.НАШ_ОТДЕЛ()},
     }
-    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=150)
+    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=60)
     out = {}
-    for row in r.get("data", []):
+    for row in cappi.олап(r):
         код = str(row.get("DishCode") or "").strip()
         if not код or (коды is not None and код not in коды):
             continue

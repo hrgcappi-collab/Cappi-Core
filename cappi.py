@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Общая библиотека Cappi: Syrve Server API, Cloud API, сайт, Glovo."""
-import hashlib, json, os, re, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, re, threading, time, urllib.error, urllib.parse, urllib.request
 from html import unescape
 
 ENV = os.path.expanduser("~/.cappi/api.env")
@@ -54,6 +54,16 @@ def _подождать(попытка):
     time.sleep(min(2 ** попытка, 8))
 
 
+def _сервис(url):
+    """Человеческое имя сервиса по адресу — для сообщений об отказе."""
+    for кусок, имя in (("syrve.online", "Syrve"), ("syrve.live", "Syrve Cloud"),
+                       ("cappi.ua/dzhamshut", "Джамшут"), ("cappi.ua", "сайт"),
+                       ("glovo", "Glovo"), ("loopa", "Loopa"), ("telegram", "Telegram")):
+        if кусок in url:
+            return имя
+    return "внешний сервис"
+
+
 def _get(url, headers=None, timeout=60):
     for попытка in range(ПОВТОРОВ_ПРИ_429 + 1):
         req = urllib.request.Request(url, headers={**UA, **(headers or {})})
@@ -61,9 +71,14 @@ def _get(url, headers=None, timeout=60):
             with _OPENER.open(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            if e.code != 429 or попытка == ПОВТОРОВ_ПРИ_429:
-                raise
-            _подождать(попытка)
+            if e.code == 429 and попытка < ПОВТОРОВ_ПРИ_429:
+                _подождать(попытка)
+                continue
+            if e.code >= 500:
+                raise ВнешнийСбой(_сервис(url), f"HTTP {e.code}") from None
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise ВнешнийСбой(_сервис(url), str(getattr(e, "reason", e))[:80]) from None
 
 
 def _post(url, body, headers=None, timeout=60, попытка=0):
@@ -76,12 +91,15 @@ def _post(url, body, headers=None, timeout=60, попытка=0):
         if not тело.strip():
             return {}
         try:
-            return json.loads(тело)
+            r = json.loads(тело)
         except ValueError:
-            # Шлюз вернул HTML или мусор с кодом 2xx. Внятная ошибка лучше
-            # JSONDecodeError, по которому не понять, что произошло.
-            raise RuntimeError(
-                f"ответ не JSON: {тело[:150].decode('utf-8', 'replace')}") from None
+            # Шлюз вернул HTML или мусор с кодом 2xx: это сбой сервиса, а не
+            # наш, и человеку надо сказать «не отвечает», а не «Сломалось».
+            raise ВнешнийСбой(_сервис(url),
+                              f"ответ не JSON: {тело[:80].decode('utf-8', 'replace')}") from None
+        if not isinstance(r, (dict, list)):
+            raise ВнешнийСбой(_сервис(url), f"ответ не объект: {str(r)[:60]}")
+        return r
     except urllib.error.HTTPError as e:
         if e.code == 429 and попытка < ПОВТОРОВ_ПРИ_429:
             _подождать(попытка)
@@ -117,6 +135,39 @@ def norm_full(s):
 
 
 # ---------------------------------------------------------------- Syrve Server
+class ВнешнийСбой(RuntimeError):
+    """Внешний сервис не ответил или ответил не тем.
+
+    Одно исключение на все границы — Syrve, Cloud, сайт, Glovo, Loopa,
+    Джамшут. Главный цикл по нему отвечает «сервис не отвечает», а не
+    «Сломалось»: для человека это разные вещи, и ждать он будет по-разному.
+    """
+
+    def __init__(self, сервис, причина=""):
+        self.сервис = сервис
+        super().__init__(f"{сервис}: {причина}" if причина else сервис)
+
+
+def олап(r):
+    """Строки OLAP-отчёта из ответа Syrve — с проверкой, что ответ вообще
+    отчёт. Раньше каждое место делало r.get("data", []) само, и пустой
+    список или null вместо словаря ронял экран."""
+    return [x for x in (форма(r, dict, "Syrve").get("data") or []) if isinstance(x, dict)]
+
+
+def форма(значение, ожидание, сервис):
+    """Проверка формы чужого ответа на входе.
+
+    Хаос-тест дал 57 падений на десяти экранах: пустой или кривой ответ
+    снаружи превращался в наш TypeError глубоко внутри экрана. Проверять
+    надо на границе, один раз, а не в каждом месте использования.
+    """
+    if not isinstance(значение, ожидание):
+        raise ВнешнийСбой(сервис, f"ожидали {ожидание.__name__}, "
+                                  f"пришло {type(значение).__name__}")
+    return значение
+
+
 class ТехкартаЗакрыта(RuntimeError):
     """Syrve не даёт менять техкарты через API на этой установке."""
 
@@ -181,6 +232,12 @@ def HQ():
                  password=c.get("SYRVE_API_PASSWORD"))
 
 
+# Одновременных сессий к Syrve — не больше трёх. Каждая занимает слот
+# лицензии; с многопоточной обработкой восемь чатов разом открыли бы восемь
+# сессий и упёрлись в лимит, а отказ выглядел бы как поломка бота.
+_СЛОТЫ = threading.BoundedSemaphore(3)
+
+
 class Syrve:
     """Сессия к Syrve Server API. Занимает слот лицензии — всегда закрывать."""
 
@@ -192,27 +249,55 @@ class Syrve:
         self.key = None
 
     def __enter__(self):
-        h = hashlib.sha1(self.password.encode()).hexdigest()
-        q = urllib.parse.urlencode({"login": self.login, "pass": h})
-        self.key = _get(f"{self.host}/resto/api/auth?{q}").strip()
-        return self
+        # Слот берём с таймаутом: если все заняты минуту, значит что-то
+        # зависло, и висеть вместе с ним нельзя.
+        if not _СЛОТЫ.acquire(timeout=60):
+            raise ВнешнийСбой("Syrve", "все сессии заняты больше минуты")
+        try:
+            h = hashlib.sha1(self.password.encode()).hexdigest()
+            q = urllib.parse.urlencode({"login": self.login, "pass": h})
+            key = (_get(f"{self.host}/resto/api/auth?{q}") or "").strip()
+            # Ключ — это hex-строка. Всё остальное (HTML шлюза, пустота,
+            # текст ошибки) — не ключ, и работать с ним дальше нельзя.
+            if not key or len(key) > 128 or "<" in key or " " in key:
+                raise ВнешнийСбой("Syrve", f"вход не удался: {key[:60] or 'пусто'}")
+            self.key = key
+            return self
+        except BaseException:
+            # Вход не удался — слот вернуть обязательно. Без этого три
+            # неудачных входа подряд навсегда вешали все следующие.
+            _СЛОТЫ.release()
+            raise
 
     def __exit__(self, *a):
         try:
-            _get(f"{self.host}/resto/api/logout?key={self.key}", timeout=20)
-        except Exception:
-            pass
+            try:
+                _get(f"{self.host}/resto/api/logout?key={self.key}", timeout=20)
+            except Exception:
+                pass
+        finally:
+            _СЛОТЫ.release()
 
     def get(self, path, **params):
         params["key"] = self.key
         return _get(f"{self.host}/resto/api/{path}?{urllib.parse.urlencode(params)}")
 
+    def _json(self, путь, **params):
+        """Ответ Syrve как JSON — или внешний сбой, если это не JSON.
+        Шлюз при перегрузке отдаёт HTML с кодом 200."""
+        сырое = self.get(путь, **params)
+        try:
+            return json.loads(сырое)
+        except ValueError:
+            raise ВнешнийСбой("Syrve", f"{путь}: ответ не JSON") from None
+
     def products(self):
-        return json.loads(self.get("v2/entities/products/list"))
+        return [p for p in форма(self._json("v2/entities/products/list"), list, "Syrve")
+                if isinstance(p, dict)]
 
     def prices(self, date):
-        d = json.loads(self.get("v2/price", dateFrom=date, dateTo=date))
-        return d["response"]
+        d = форма(self._json("v2/price", dateFrom=date, dateTo=date), dict, "Syrve")
+        return [r for r in форма(d.get("response"), list, "Syrve") if isinstance(r, dict)]
 
     def price_of(self, product_id, date, department=None):
         """Действующая цена и подразделение.
@@ -307,9 +392,9 @@ class Syrve:
         return r["response"]
 
     def orders(self, date_from, date_to):
-        d = json.loads(self.get("v2/documents/menuChange",
-                                dateFrom=date_from, dateTo=date_to))
-        return d["response"]
+        d = форма(self._json("v2/documents/menuChange",
+                             dateFrom=date_from, dateTo=date_to), dict, "Syrve")
+        return [r for r in форма(d.get("response"), list, "Syrve") if isinstance(r, dict)]
 
     def set_price(self, product_id, department_id, price, date):
         """Меняет цену позиции на дату — всегда новым приказом.
@@ -409,11 +494,14 @@ class Syrve:
 def cloud_menu():
     """Меню доставки с реальными ценами — то, что видят внешние системы."""
     c = cfg()
-    tok = _post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
-                {"apiLogin": c["SYRVE_CLOUD_API_KEY"]})["token"]
-    return _post(f"{c['SYRVE_CLOUD_URL']}/api/1/nomenclature",
-                 {"organizationId": c["SYRVE_ORG_ID"]},
-                 {"Authorization": f"Bearer {tok}"}, timeout=90)["products"]
+    tok = форма(_post(f"{c['SYRVE_CLOUD_URL']}/api/1/access_token",
+                      {"apiLogin": c["SYRVE_CLOUD_API_KEY"]}), dict, "Syrve Cloud").get("token")
+    if not tok:
+        raise ВнешнийСбой("Syrve Cloud", "не выдал токен")
+    r = форма(_post(f"{c['SYRVE_CLOUD_URL']}/api/1/nomenclature",
+                    {"organizationId": c["SYRVE_ORG_ID"]},
+                    {"Authorization": f"Bearer {tok}"}, timeout=90), dict, "Syrve Cloud")
+    return [p for p in форма(r.get("products"), list, "Syrve Cloud") if isinstance(p, dict)]
 
 
 def cloud_prices():
@@ -444,8 +532,12 @@ def site_prices(city=SITE_CITY):
     `cross` — перечёркнутая «старая цена» для бейджа скидки; 0 значит скидки нет.
     """
     out = {}
-    for cat in site_menu(city):
-        for it in cat.get("items", []):
+    for cat in форма(site_menu(city), list, "сайт"):
+        if not isinstance(cat, dict):
+            continue
+        for it in (cat.get("items") or []):
+            if not isinstance(it, dict):
+                continue
             g = it.get("api_guid")
             if g:
                 out[g] = {"name": it.get("name", ""),
