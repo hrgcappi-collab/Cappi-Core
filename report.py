@@ -505,6 +505,50 @@ def филиал_по_имени(имя):
     return None
 
 
+def явки_период(s, с, по):
+    """Явки за период одним запросом: по дням это N запросов и N×2
+    справочников. «Правки явок» за неделю занимали шесть секунд."""
+    q = urllib.parse.urlencode({"from": с.isoformat(),
+                                "to": (по + timedelta(days=1)).isoformat(),
+                                "key": s.key})
+    xml = cappi._get(f"{s.host}/resto/api/employees/attendance?{q}", timeout=90)
+    имена = _справочник(s, "employees", "employee")
+    роли = _справочник(s, "employees/roles", "role")
+    out = {}
+    for a in _xml(xml, "явки").findall("attendance"):
+        d1, d2 = a.findtext("dateFrom"), a.findtext("dateTo")
+        if not (d1 and d2):
+            continue
+        день = date.fromisoformat(d1[:10])
+        if not (с <= день <= по):
+            continue
+        out.setdefault(день, []).append((a, имена, роли))
+    return out
+
+
+def _правки_из(записи):
+    """Правки задним числом из готовых записей явки."""
+    out = []
+    for a, имена, роли in записи:
+        d2, изменена = a.findtext("dateTo"), a.findtext("modified")
+        if not (d2 and изменена):
+            continue
+        try:
+            разрыв = (datetime.fromisoformat(изменена)
+                      - datetime.fromisoformat(d2)).total_seconds() / 60
+        except Exception:
+            continue
+        if разрыв <= 30:
+            continue
+        out.append({"кто": имена.get(a.findtext("employeeId")) or "?",
+                    "роль": роли.get(a.findtext("roleId")) or "—",
+                    "смена": f"{a.findtext('dateFrom')[11:16]}–{d2[11:16]}",
+                    "через": разрыв,
+                    "правил": имена.get(a.findtext("userModified"),
+                                        a.findtext("userModified") or "?")})
+    return out
+
+
 def attendance(s, day):
     """Кто был на смене, сколько часов, и правили ли записи задним числом."""
     q = urllib.parse.urlencode({"from": day.isoformat(),
@@ -529,13 +573,14 @@ def attendance(s, day):
                  - datetime.fromisoformat(d1)).total_seconds() / 3600
         всего_часов += часов
         роль = роли.get(a.findtext("roleId")) or "—"
-        r = по_ролям.setdefault(роль, {"людей": 0, "часов": 0.0})
-        r["людей"] += 1
+        имя_сотрудника = имена.get(a.findtext("employeeId")) or "?"
+        r = по_ролям.setdefault(роль, {"людей": set(), "часов": 0.0})
+        r["людей"].add(имя_сотрудника)
         r["часов"] += часов
 
         # Держим и поимённо: одна и та же смена нужна и сводкой по ролям,
         # и списком с фамилиями, когда спрашивают «а кто именно».
-        имя = имена.get(a.findtext("employeeId")) or "?"
+        имя = имя_сотрудника
         ч = люди.setdefault(имя, {"имя": имя, "роль": роль, "часов": 0.0,
                                   "филиал": филиал_по_имени(имя),
                                   "смены": []})
@@ -556,6 +601,8 @@ def attendance(s, day):
             except Exception:
                 pass
 
+    for r in по_ролям.values():
+        r["людей"] = len(r["людей"])
     по_филиалам = {}
     for ч in люди.values():
         ф = по_филиалам.setdefault(ч["филиал"] or "без филиала",
@@ -566,7 +613,9 @@ def attendance(s, day):
         р["людей"] += 1
         р["часов"] += ч["часов"]
     return {"по_ролям": по_ролям, "часов": всего_часов,
-            "людей": sum(r["людей"] for r in по_ролям.values()),
+            # Людей — по людям, а не по записям явки: кто отметился дважды
+            # за смену, считался за двоих («23 чел» при 22 фактических).
+            "людей": len(люди),
             "правки": правки,
             "люди": sorted(люди.values(), key=lambda ч: -ч["часов"]),
             "по_филиалам": по_филиалам}
