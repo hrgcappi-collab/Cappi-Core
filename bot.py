@@ -467,7 +467,7 @@ def _строка_расхождения(r):
 
 
 def cmd_check(chat):
-    say(chat, "Сверяю цены: Syrve ↔ сайт ↔ Glovo. Это займёт минуту…")
+    _печатает(chat)
     плохие, сколько = расхождения_витрин()
     head = (f"Syrve {сколько['syrve']} · сайт {сколько['сайт']} · "
             f"Glovo {сколько['glovo']}\n"
@@ -487,9 +487,15 @@ def cmd_pending(chat):
         f" — {datetime.fromisoformat(i['due']):%d.%m %H:%M}" for i in items))
 
 
+def _рабочий_день():
+    """До открытия (10:00) сегодняшних данных ещё нет — показываем вчера."""
+    return date.today() - timedelta(days=1) if datetime.now().hour < 10 else date.today()
+
+
 def cmd_report(chat, day=None, live=True):
-    say(chat, "Считаю показатели…")
-    say(chat, report.render(report.collect(day), live=live))
+    _печатает(chat)
+    day = day or date.today()
+    say(chat, report.render(report.collect(day), live=live), inline=_период("отч", day))
 
 
 def cmd_plan(chat, текст):
@@ -573,7 +579,7 @@ def cmd_plan(chat, текст):
 
 
 def cmd_healthcheck(chat):
-    say(chat, "Проверяю все подключения…")
+    _печатает(chat)
     import subprocess
     r = subprocess.run([sys.executable, os.path.join(HERE, "healthcheck.py")],
                        capture_output=True, text=True, timeout=60)
@@ -833,8 +839,7 @@ def cmd_price_list(chat, текст, who):
                          f"а у тебя роль «{access.роль(chat) or 'без роли'}». "
                          f"Показать, что в списке, могу — менять нет.")
     строки, мусор = разобрать_список(текст)
-    say(chat, f"Разбираю {склонение(len(строки), 'строку', 'строки', 'строк')} "
-              f"— смотрю текущие цены…")
+    _печатает(chat)
 
     когда = _default_date()
     нашёл, спорные, нет_позиции, без_цены, скачки, совпали = [], [], [], [], [], []
@@ -1824,14 +1829,33 @@ def on_button(q):
     if act == "sp":
         return cmd_pick_shift_day(chat, _номер(arg) or 0)
 
-    if act == "rd":                                   # отчёт за выбранный день
-        d = дата_из_текста(arg)
-        if d is None:
-            return say(chat, "Кнопка устарела — выбери день заново.")
-        return cmd_report(chat, d, live=(d == date.today()))
+    if act == "пр":                                   # экран за выбранный день
+        код, _, дата_ = arg.partition(":")
+        d = дата_из_текста(дата_)
+        экран = ЭКРАНЫ_ДНЯ.get(код)
+        if d is None or экран is None:
+            return say(chat, "Кнопка устарела — открой экран заново.")
+        if d > date.today():
+            return say(chat, f"{d:%d.%m} ещё не наступило.")
+        _печатает(chat)
+        return экран(chat, d)
 
-    if act == "rp":                                   # листаем календарь назад
-        return cmd_pick_day(chat, _номер(arg) or 0)
+    if act == "пк":                                   # календарь для этого экрана
+        код, _, сдвиг = arg.partition(":")
+        if код not in ЭКРАНЫ_ДНЯ:
+            return say(chat, "Кнопка устарела — открой экран заново.")
+        return cmd_pick_day(chat, _номер(сдвиг) or 0, код)
+
+    if act == "пд":                                   # окно в N дней
+        код, _, n = arg.partition(":")
+        экран = ЭКРАНЫ_ДНЕЙ.get(код)
+        if экран is None or _номер(n) not in (7, 14, 30):
+            return say(chat, "Кнопка устарела — открой экран заново.")
+        _печатает(chat)
+        return экран(chat, _номер(n))
+
+    if act in ("rd", "rp"):                           # кнопки из старых сообщений
+        return say(chat, "Кнопка из старой версии — открой экран заново.")
 
     if act == "ac":                                   # карточка человека
         return экран_человека(chat, arg)
@@ -1874,7 +1898,7 @@ def on_button(q):
         if not hits:
             return say(chat, "Позиция пропала из меню.")
         _, p = hits[0]
-        say(chat, "Смотрю витрины…")
+        _печатает(chat)
         s, g = where_shown(p["id"], p["name"])
         m = lambda v: fmt(v) if v is not None else "не нашёл"
         return say(chat, f"<b>{э(p['name'])}</b>\n\n"
@@ -2082,7 +2106,43 @@ def команда_цены(chat, что, цена):
 ДНИ_НЕДЕЛИ = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 
-def cmd_pick_day(chat, сдвиг=0):
+# Период — одной строкой кнопок на каждом экране с данными. До этого
+# фильтр по дате был у одного экрана из четырнадцати: списания за
+# прошлый вторник посмотреть было негде.
+ЭКРАНЫ_ДНЯ = {}          # код → функция(chat, day); заполняется ниже, после определений
+
+
+def _период(код, day):
+    """Кнопки периода: сегодня · вчера · позавчера · другой день."""
+    day = day or date.today()
+    ряд = []
+    for i, подпись in ((0, "сегодня"), (1, "вчера"), (2, "позавчера")):
+        d = date.today() - timedelta(days=i)
+        текст = f"• {подпись}" if d == day else подпись
+        ряд.append({"text": текст, "callback_data": f"пр:{код}:{d.isoformat()}"})
+    return [ряд, [{"text": "📅 другой день", "callback_data": f"пк:{код}:0"}]]
+
+
+def _дни(код, дней):
+    """Кнопки окна для экранов «за N дней»."""
+    return [[{"text": (f"• {n} дн" if n == дней else f"{n} дн"),
+              "callback_data": f"пд:{код}:{n}"} for n in (7, 14, 30)]]
+
+
+def _печатает(chat):
+    """«Печатает…» вместо отдельного сообщения «Считаю…».
+
+    Восемь экранов из тридцати девяти отвечали двумя сообщениями: сначала
+    «Считаю…», потом результат. Индикатор набора даёт то же ощущение
+    «бот живой», не засоряя чат.
+    """
+    try:
+        tg("sendChatAction", chat_id=chat, action="typing")
+    except Exception:
+        pass
+
+
+def cmd_pick_day(chat, сдвиг=0, код="отч"):
     """Выбор дня для отчёта. Кнопками, потому что дату руками набирают с
     опечатками, а формат каждый раз вспоминают заново."""
     кнопки, ряд = [], []
@@ -2090,12 +2150,12 @@ def cmd_pick_day(chat, сдвиг=0):
         d = date.today() - timedelta(days=i)
         подпись = ("сегодня" if i == 0 else "вчера" if i == 1
                    else f"{d:%d.%m} {ДНИ_НЕДЕЛИ[d.weekday()]}")
-        ряд.append({"text": подпись, "callback_data": f"rd:{d.isoformat()}"})
+        ряд.append({"text": подпись, "callback_data": f"пр:{код}:{d.isoformat()}"})
         if len(ряд) == 3:
             кнопки.append(ряд); ряд = []
     if ряд:
         кнопки.append(ряд)
-    кнопки.append([{"text": "← ещё раньше", "callback_data": f"rp:{сдвиг + 14}"}])
+    кнопки.append([{"text": "← ещё раньше", "callback_data": f"пк:{код}:{сдвиг + 14}"}])
     say(chat, "За какой день?", inline=кнопки)
 
 
@@ -2120,7 +2180,7 @@ def cmd_complaints(chat, day=None):
         строки += ["", "<b>По точкам</b>"]
         строки += [f"    {т} — {n}"
                    for т, n in sorted(ж["по_точкам"].items(), key=lambda x: -x[1])]
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_период("жал", day))
 
 
 def cmd_zones(chat, day=None):
@@ -2145,7 +2205,7 @@ def cmd_zones(chat, day=None):
     if з["ещё_закрыты"]:
         строки += ["", f"<i>{з['ещё_закрыты']} ещё закрыты — "
                        f"время посчитано по плану, а не по факту.</i>"]
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_период("зон", day))
 
 
 def cmd_live(chat):
@@ -2183,7 +2243,7 @@ def cmd_cancels(chat, day=None):
             строки.append(f"    {э(п)} — {v['штук']:.0f} шт в {v.get('заказов', 0)} зак{деньги}")
             for к, n in sorted((v.get("комментарии") or {}).items(), key=lambda x: -x[1])[:3]:
                 строки.append(f"        <i>«{э(к[:52])}»{f' ×{n}' if n > 1 else ''}</i>")
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_период("отм", day))
 
 
 def _отказ(m, текст):
@@ -2266,8 +2326,14 @@ def cmd_unknown(chat, n=25):
     say(chat, "\n".join(out))
 
 
-def открыть(chat, модуль, текст):
+def открыть(chat, модуль, текст, затем=None):
+    """Вход в модуль. Если у модуля есть главный экран — показываем его
+    сразу: нажатие, после которого видна только подпись к кнопке, —
+    потерянное нажатие."""
     _menu[chat] = модуль
+    if затем:
+        _печатает(chat)
+        return затем(chat)
     say(chat, текст)
 
 
@@ -2333,7 +2399,7 @@ def cmd_jam_open(chat):
 
 
 def cmd_jam_history(chat, дней=7):
-    say(chat, f"Смотрю историю за {дней} дней…")
+    _печатает(chat)
     try:
         события, пропуски = jamshut.история(дней)
     except Exception as e:
@@ -2359,11 +2425,11 @@ def cmd_jam_history(chat, дней=7):
         куски = ", ".join(f"{с:%d.%m}–{по:%d.%m}" for с, по, _ in пропуски)
         строки += ["", f"⚠️ <i>Не ответили куски: {куски}. "
                        f"Здесь показано не всё.</i>"]
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_дни("ист", дней))
 
 
 def cmd_jam_who(chat, дней=7):
-    say(chat, "Считаю…")
+    _печатает(chat)
     try:
         с = jamshut.сводка(дней)
     except Exception as e:
@@ -2382,7 +2448,7 @@ def cmd_jam_who(chat, дней=7):
     if с.get("пропуски"):
         строки += ["", f"⚠️ <i>{len(с['пропуски'])} кусков истории не "
                        f"ответили — цифры неполные.</i>"]
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_дни("кто", дней))
 
 
 def cmd_jam_health(chat):
@@ -2454,13 +2520,13 @@ def cmd_deletions(chat, day=None):
     for x in sorted(сп, key=lambda x: -x["сумма"])[:15]:
         строки.append(f"  {x['блюдо'][:30]} — {report.money(x['сумма'])} ₴"
                       f"\n     чек {x['чек']} · {x['зал']} · {x['кто'][:20]}")
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_период("спис", day))
 
 
-def _сводка_позиций(chat, day, позиции, заголовок, пусто):
+def _сводка_позиций(chat, day, позиции, заголовок, пусто, inline=None):
     if not позиции:
         return say(chat, пусто)
-    say(chat, "Считаю продажи…")
+    _печатает(chat)
     with cappi.Syrve() as s:
         св = promo.сводка(s, day, позиции)
     строки = [f"{заголовок} · {day:%d.%m}", "",
@@ -2477,7 +2543,7 @@ def _сводка_позиций(chat, day, позиции, заголовок, 
             хвост = (f"  <i>скидка {report.money(x['выгода'])} ₴</i>"
                      if x.get("выгода") else "")
             строки.append(f"  {x['код'] or '—'} {x['название'][:30]}{хвост}")
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=inline)
 
 
 def cmd_promo(chat, day=None):
@@ -2486,9 +2552,11 @@ def cmd_promo(chat, day=None):
         позиции = promo.акционные()
     except Exception as e:
         return say(chat, f"Не смог прочитать сайт: {str(e)[:100]}")
-    _сводка_позиций(chat, day or date.today(), позиции,
+    day = day or date.today()
+    _сводка_позиций(chat, day, позиции,
                     "🏷 <b>Акционные товары</b>",
-                    "Сейчас на сайте нет позиций со скидкой.")
+                    "Сейчас на сайте нет позиций со скидкой.",
+                    inline=_период("акц", day))
 
 
 def cmd_special(chat, day=None):
@@ -2592,7 +2660,8 @@ def cmd_shift(chat, day=None, поимённо=False):
     кнопка = ("👥 Скрыть ФИО" if поимённо else "👤 Показать ФИО")
     say(chat, "\n".join(строки).rstrip(),
         inline=[[{"text": кнопка,
-                  "callback_data": f"см:{day.isoformat()}:{0 if поимённо else 1}"}]])
+                  "callback_data": f"см:{day.isoformat()}:{0 if поимённо else 1}"}]]
+               + _период("смен", day))
 
 
 МЕСЯЦЫ = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль",
@@ -2622,7 +2691,7 @@ def cmd_процент(chat, месяц=None):
     day = дата_из_текста(f"{месяц}-15")
     if day is None:
         return say(chat, "Кнопка устарела — выбери месяц заново.")
-    say(chat, "Считаю…")
+    _печатает(chat)
     with cappi.Syrve() as s:
         r = kpi.процент_кухни(s, day)
     строки = [f"💵 <b>Процент кухни · {МЕСЯЦЫ[day.month - 1]} {day.year}</b>", ""]
@@ -2725,7 +2794,7 @@ def cmd_kpi_показать(chat, роль, месяц):
     day = дата_из_текста(f"{месяц}-15")
     if day is None:
         return say(chat, "Кнопка устарела — выбери месяц заново.")
-    say(chat, "Считаю…")
+    _печатает(chat)
     with cappi.Syrve() as s:
         r = kpi.посчитать(s, day)
         фио = kpi.кто(s, роль)
@@ -3015,7 +3084,7 @@ def cmd_shift_edits(chat, дней=7):
     Правка сама по себе законна — забыли отметить, поправили. Но правка
     через несколько часов меняет оплачиваемые часы задним числом.
     """
-    say(chat, f"Смотрю явки за {дней} дней…")
+    _печатает(chat)
     найдено, виденные = [], set()
     with cappi.Syrve() as s:
         имена = report._справочник(s, "employees", "employee")
@@ -3038,7 +3107,7 @@ def cmd_shift_edits(chat, дней=7):
     for d, p in sorted(найдено, key=lambda x: -x[1]["через"])[:20]:
         строки.append(f"  {d:%d.%m} · {p['кто'][:22]} · {p['смена']}\n"
                       f"      через {p['через']:.0f} мин, {p['правил']}")
-    say(chat, "\n".join(строки))
+    say(chat, "\n".join(строки), inline=_дни("прав", дней))
 
 
 def cmd_pick_shift_day(chat, сдвиг=0):
@@ -3187,7 +3256,7 @@ def cmd_негода(chat, день=None):
     значит проверить, что одно соответствует другому, можно только здесь.
     """
     день = день or date.today()
-    say(chat, "Смотрю заказы…")
+    _печатает(chat)
     with cappi.Syrve() as s:
         д = report.негода_сейчас(s, день)
     взяли, пропущены = д["за_день"], д["пропущены"]
@@ -3195,7 +3264,7 @@ def cmd_негода(chat, день=None):
         строки = [f"☔ <b>Непогода · {день:%d.%m}</b>", "",
                   "Компенсацию сегодня не брали ни разу.",
                   "<i>Либо погода хорошая, либо режим не включали.</i>"]
-        return say(chat, "\n".join(строки), inline=_кнопки_негоды())
+        return say(chat, "\n".join(строки), inline=_кнопки_негоды() + _период("нег", день))
     сумма = sum(з["сумма"] for з in взяли)
     окно = f"{взяли[0]['время'][11:16]}–{взяли[-1]['время'][11:16]}"
     строки = [f"☔ <b>Непогода · {день:%d.%m}</b>", "",
@@ -3217,22 +3286,22 @@ def cmd_негода(chat, день=None):
                       "постоянный гость, — но стоит посмотреть.</i>")
     else:
         строки += ["", "✅ Внутри окна компенсацию взяли со всех."]
-    say(chat, "\n".join(строки), inline=_кнопки_негоды())
+    say(chat, "\n".join(строки), inline=_кнопки_негоды() + _период("нег", день))
 
 
 def _кнопки_негоды():
     """Управление непогодой — когда Джамшут научится его отдавать."""
     if not jamshut.умеет("/weather/state"):
-        return [[{"text": "📅 За вчера", "callback_data": "нг:вчера"}]]
+        return []
     try:
         состояние = jamshut.погода_состояние()
     except Exception:
-        return [[{"text": "📅 За вчера", "callback_data": "нг:вчера"}]]
+        return []
     включена = состояние.get("on")
     return [[{"text": "☀️ Выключить непогоду" if включена
                       else "☔ Включить непогоду",
               "callback_data": "нгв:off" if включена else "нгв:on"}],
-            [{"text": "📅 За вчера", "callback_data": "нг:вчера"}]]
+           ]
 
 
 def _watch_негода(последний):
@@ -3385,7 +3454,7 @@ def показать_сс(chat, запрос):
 
 
 def _показать_сс(chat, товар):
-    say(chat, "Считаю…")
+    _печатает(chat)
     r = cost.блюда(товар["id"])
     if not r:
         return say(chat, f"У «{товар['name']}» нет техкарты — "
@@ -3469,7 +3538,7 @@ def показать_состав(chat, текст):
                    inline=[[{"text": f"{p['name'][:34]} · {p.get('num')}",
                              "callback_data": f"сз:{p.get('num')}"}]
                            for p in с["варианты"]])
-    say(chat, "Считаю…")
+    _печатает(chat)
     r = cost.по_составу(найдено)
     строки = ["🧮 <b>Просчёт по составу</b>", ""]
     for с in r["строки"]:
@@ -3869,9 +3938,19 @@ def цена_новому(chat, c, who):
                 f"модификаторы и место приготовления API не ставит.</i>")
 
 
+# Экраны, умеющие показать любой день. Ключи короткие: callback_data —
+# 64 байта, и кириллица там весит по два.
+ЭКРАНЫ_ДНЯ.update({
+    "отч": lambda chat, d: cmd_report(chat, d, live=(d == date.today())),
+    "отм": cmd_cancels, "спис": cmd_deletions, "акц": cmd_promo,
+    "жал": cmd_complaints, "зон": cmd_zones, "нег": cmd_негода,
+    "смен": lambda chat, d: cmd_shift(chat, d),
+})
+ЭКРАНЫ_ДНЕЙ = {"ист": cmd_jam_history, "кто": cmd_jam_who, "прав": cmd_shift_edits}
+
+
 BUTTONS = {
-    "🤖 джамшут": lambda chat: открыть(chat, "джамшут",
-        "<b>Джамшут</b>\nБот закрытия зон. Core им управляет, он Core не видит."),
+    "🤖 джамшут": lambda chat: открыть(chat, "джамшут", "", затем=cmd_jam_state),
     "🚦 зоны сейчас": cmd_jam_state,
     "🚧 закрыть зону": cmd_jam_close,
     "✅ открыть зону": cmd_jam_open,
@@ -3879,8 +3958,8 @@ BUTTONS = {
     "👤 кто закрывал": cmd_jam_who,
     "🩺 здоровье": cmd_jam_health,
     "☔ непогода": cmd_негода,
-    "🧑‍🍳 персонал": lambda chat: открыть(chat, "персонал",
-        "<b>Персонал</b>\nКто на смене, часы, выручка на человеко-час."),
+    "🧑‍🍳 персонал": lambda chat: открыть(chat, "персонал", "",
+        затем=lambda c: cmd_shift(c, _рабочий_день())),
     "🏷 акционные": cmd_promo,
     "⭐ спецпредложение": cmd_special,
     "🛑 стоп-лист": cmd_stoplist,
@@ -3897,12 +3976,10 @@ BUTTONS = {
     # главное меню — вход в модули
     "💰 цены": lambda chat: открыть(chat, "цены",
         "<b>Цены</b>\nПоиск позиций, смена цены, сверка витрин."),
-    "📈 показатели": lambda chat: открыть(chat, "показатели",
-        "<b>Показатели</b>\nВыручка против плана, заказы, отмены, живые заказы."),
-    "🛒 продажи": lambda chat: открыть(chat, "продажи",
-        "<b>Продажи</b>\nСтоп-лист, заказы в работе, отмены."),
-    "⚙️ админка": lambda chat: открыть(chat, "админка",
-        "<b>Админка</b>\nПодключения, журнал, доступ, состояние."),
+    "📈 показатели": lambda chat: открыть(chat, "показатели", "",
+        затем=lambda c: cmd_report(c, _рабочий_день(), live=(_рабочий_день() == date.today()))),
+    "🛒 продажи": lambda chat: открыть(chat, "продажи", "", затем=cmd_stoplist),
+    "⚙️ админка": lambda chat: открыть(chat, "админка", "", затем=cmd_botstate),
     "◀️ назад": lambda chat: открыть(chat, "главное", "Главное меню"),
 
     # модуль «Цены»
@@ -3914,7 +3991,7 @@ BUTTONS = {
     "📈 сейчас": lambda chat: cmd_report(chat, None, live=True),
     "📅 за вчера": lambda chat: cmd_report(chat, date.today() - timedelta(days=1),
                                           live=False),
-    "📅 выбрать день": cmd_pick_day,
+    "📅 выбрать день": lambda chat: cmd_pick_day(chat, 0, "отч"),
     "🎯 план": lambda chat: cmd_plan(chat, ""),
     "⏱ время работы": cmd_время,
     "🚧 зоны": cmd_zones,
