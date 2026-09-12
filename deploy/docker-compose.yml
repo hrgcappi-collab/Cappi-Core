@@ -7,6 +7,14 @@ services:
     image: cappi-core
     container_name: cappi-core
     restart: unless-stopped        # поднимется сам после ребута сервера
+    logging:
+      # Без ограничения docker пишет журнал бесконечно: бот болтливый,
+      # и за год это гигабайты на диске сервера, который делит место с
+      # Джамшутом и базой.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       # Дублирует ENV TZ из Dockerfile нарочно. Время отчётов считается по
       # местному: итоги дня в 22:30 — это 22:30 в Одессе, а сервер живёт в

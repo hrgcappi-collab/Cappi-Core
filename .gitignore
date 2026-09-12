@@ -18,6 +18,14 @@ special.json
 kpi.json
 alerts_seen.json
 changes.log
+bugs.jsonl
+bugs_state.json
+настройки.json
+словарь.json
+
+# Выгрузки отчётов — это данные, а не код: чужие телефоны гостей,
+# суммы, имена сотрудников. В репозитории им не место.
+выгрузка/
 
 __pycache__/
 *.pyc
