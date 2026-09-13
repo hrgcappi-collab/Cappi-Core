@@ -17,7 +17,7 @@ Syrve не даст, а по дням — это тысяча запросов �
 import csv
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import cappi
 import report

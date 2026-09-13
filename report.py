@@ -331,34 +331,6 @@ def sales(s, day):
     }
 
 
-def by_category(s, day):
-    """Заказы и блюда по категориям, отдельно Блюдо и Товар, по точкам.
-
-    Разрез такой же, как в сводной таблице Syrve, к которой все привыкли:
-    строки — тип товара и категория, колонки — концепции.
-
-    Важно про «Заказов». Сложить его по категориям нельзя: заказ с роллами
-    и пиццей попадёт в обе строки. Поэтому итог берём отдельным запросом
-    без разбивки, а по строкам он честен только внутри своей строки.
-
-    Кнопки в боте пока нет — не понадобилась. Функция проверена на живых
-    данных и лежит готовой: чтобы включить, нужен экран и строка в BUTTONS.
-    """
-    rows = _olap(s, day, ["DishType", "DishCategory"],
-                 ["UniqOrderId", "DishAmountInt"],
-                 {**НАШ_ОТДЕЛ(), **НЕ_УДАЛЁННЫЕ, **ЕДА}, колонки=["Conception"])
-    out = {}
-    for r in rows:
-        тип = r.get("DishType") or "—"
-        кат = r.get("DishCategory") or "без категории"
-        точка = (r.get("Conception") or "—").lstrip("012 ").strip()
-        цель = out.setdefault(тип, {}).setdefault(кат, {})
-        т = цель.setdefault(точка, {"заказов": 0, "блюд": 0})
-        т["заказов"] += r.get("UniqOrderId", 0) or 0
-        т["блюд"] += r.get("DishAmountInt", 0) or 0
-    return out
-
-
 def sales_by_point(s, day):
     """Выручка и чеки по точкам — план ведут именно так."""
     rows = _olap(s, day, ["RestaurantSection"],
@@ -423,21 +395,6 @@ def выручка_пиу(s, с, по):
         if имя:
             точки[имя] = точки.get(имя, 0) + сумма
     return {"всего": всего, "точки": точки}
-
-
-def month_to_date(s, day):
-    """Выручка с первого числа по этот день включительно."""
-    первое = date(day.year, day.month, 1)
-    body = {"reportType": "SALES", "buildSummary": False,
-            "groupByRowFields": ["RestaurantSection"],
-            "aggregateFields": ["DishDiscountSumInt"],
-            "filters": {"OpenDate.Typed": {
-                "filterType": "DateRange", "periodType": "CUSTOM",
-                "from": первое.isoformat(),
-                "to": (day + timedelta(days=1)).isoformat()},
-                **НАШ_ОТДЕЛ()}}
-    r = cappi._post(f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=60)
-    return sum(row.get("DishDiscountSumInt", 0) or 0 for row in cappi.олап(r))
 
 
 def cancels(s, day):

@@ -18,7 +18,7 @@ Core знает адрес Джамшута и его токен, ходит к 
 точка соприкосновения — HTTP с токеном.
 """
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import cappi
 
@@ -232,15 +232,6 @@ def погода_включить(минут_доплаты, кто):
 
 def погода_выключить(кто):
     return _post("/weather/off", {"actor": кто, "source": "core"})
-
-
-def время_доставки():
-    return _get("/delivery/time")
-
-
-def время_доставки_задать(плюс_минут, кто):
-    return _post("/delivery/time", {"extra_min": плюс_минут, "actor": кто,
-                                    "source": "core"})
 
 
 def умеет(путь):

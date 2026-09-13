@@ -39,7 +39,6 @@ for м in МУСОР_JSON:
 cappi._get, cappi._post = родной_get, родной_post
 # 2) сеть лежит
 import urllib.error
-def сеть_лежит(*a,**k): raise urllib.error.URLError("connection refused (тест)")
 cappi._get=lambda *a,**k: (_ for _ in ()).throw(cappi.ВнешнийСбой("Syrve","connection refused"))
 cappi._post=lambda *a,**k: (_ for _ in ()).throw(cappi.ВнешнийСбой("Syrve","connection refused"))
 прогнать("сеть лежит")
