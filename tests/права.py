@@ -41,7 +41,7 @@ bot._confirm.update({
  "T4":{"создан":time.time(),"товар":{"id":"x","name":"Т","num":"1","defaultSalePrice":1},"chat":1},
  "T5":{"создан":time.time(),"товар":{"id":"x","name":"Т","num":"1"},"цена":1,"сс":1,"chat":1},
 })
-КНОПКИ=["go:T1","gl:T2","gv:T1","gj:T2","ld:T2","dt:T1","нб:T3","тк:T4","нц:T5",
+КНОПКИ=["go:T1","gl:T2","gv:T1","gj:T2","ld:T2","dt:T1","бк:T3","тк:T4","нц:T5",
         "zy:17:30","zk:17","zo:17","нгв:on","нгв:off",
         "sr:zzz","sa:zzz","sy:zzz","sn:zzz","sx:03275",
         "ar:1:админ","ax:1","ag:1:админ","bs:x:починен"]
