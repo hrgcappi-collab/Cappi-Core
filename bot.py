@@ -561,9 +561,9 @@ def cmd_plan(chat, текст):
         строки += ["", f"Итого <b>{report.money(итого)} ₴</b> за месяц"]
         return say(chat, "\n".join(строки))
     if not заполненные:
-        return say(chat, "Не нашёл в тексте дней недели с суммами.\n"
-                         "Ожидаю строку с названием точки, а под ней "
-                         "<code>Пн  58420</code> и так далее.")
+        return say(chat, "Не нашёл в тексте дней с суммами.\n"
+                         "Ожидаю строку с названием точки, а под ней дни — "
+                         "<code>Пн  58420</code> или <code>14.09.2026  59004,2</code>.")
     # Дописываем, а не заменяем: план часто присылают по одной точке, и
     # затирать этим вторую значит молча обнулить ей план.
     было = p.setdefault("weekly", {})
@@ -574,8 +574,17 @@ def cmd_plan(chat, текст):
     for точка, дни in заполненные.items():
         строки.append(f"<b>{report.ТОЧКИ.get(точка, точка)}</b> — "
                       f"{report.money(sum(дни.values()))} ₴/нед")
-        строки.append("    " + "  ".join(
-            f"{d} {report.money(дни.get(d, 0))}" for d in report.ДНИ))
+        # Показываем в том виде, в каком прислали: план датами по дням
+        # недели — это семь нулей, и человек решает, что запись не прошла.
+        по_датам = sorted(д for д in дни if re.fullmatch(r"\d{4}-\d\d-\d\d", д))
+        if по_датам:
+            строки.append("    " + "  ".join(
+                f"{date.fromisoformat(д):%d.%m} {report.money(дни[д])}"
+                for д in по_датам))
+        недельные = [d for d in report.ДНИ if d in дни]
+        if недельные:
+            строки.append("    " + "  ".join(
+                f"{d} {report.money(дни[d])}" for d in недельные))
     итого = sum(sum(д.values()) for д in заполненные.values())
     строки += ["", f"Итого <b>{report.money(итого)} ₴</b> в неделю"]
     if ошибки:
@@ -2611,6 +2620,7 @@ def cmd_promo(chat, day=None):
 def cmd_special(chat, day=None):
     """Спецпредложение — ручной список артикулов."""
     d = promo.спецпредложения()
+    day = day or date.today()
     if not d:
         if access.можно(chat, "цены"):
             _await[chat] = {"what": "special"}
@@ -2620,8 +2630,8 @@ def cmd_special(chat, day=None):
         return say(chat, "Спецпредложение пустое.")
     позиции = [{"код": к, "название": v["название"], "guid": v.get("guid")}
                for к, v in d.items()]
-    _сводка_позиций(chat, day or date.today(), позиции,
-                    "⭐ <b>Спецпредложение</b>", "")
+    _сводка_позиций(chat, day, позиции, "⭐ Спецпредложение", "",
+                    inline=_период("спец", day))
     if access.можно(chat, "цены"):
         say(chat, "Убрать позицию:", inline=[
             [{"text": f"🗑 {к} · {v['название'][:26]}", "callback_data": f"sx:{к}"}]
@@ -3969,6 +3979,7 @@ def цена_новому(chat, c, who):
     "отч": lambda chat, d: cmd_report(chat, d, live=(d == date.today())),
     "отм": cmd_cancels, "спис": cmd_deletions, "акц": cmd_promo,
     "жал": cmd_complaints, "зон": cmd_zones, "нег": cmd_негода,
+    "спец": cmd_special,
     "смен": lambda chat, d: cmd_shift(chat, d),
 })
 ЭКРАНЫ_ДНЕЙ = {"ист": cmd_jam_history, "кто": cmd_jam_who, "прав": cmd_shift_edits}
