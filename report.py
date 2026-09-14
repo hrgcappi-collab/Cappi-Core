@@ -331,6 +331,71 @@ def sales(s, day):
     }
 
 
+# Что вообще можно спросить у OLAP. Список закрытый нарочно: запрос
+# составляет языковая модель, и выпускать её в чужой API со свободными
+# полями нельзя. Всё, что не отсюда, — отказ, а не попытка.
+РАЗРЕЗЫ = {
+    "DishName": "блюдо", "DishCategory": "категория", "DishType": "тип товара",
+    "DishCode": "артикул", "RestaurantSection": "зал", "Conception": "филиал",
+    "OrderType": "тип заказа", "HourClose": "час", "WeekInYearOpen": "неделя",
+    "OpenDate.Typed": "дата", "Delivery.CancelCause": "причина отмены",
+    "RemovalType": "причина удаления", "OrderWaiter.Name": "сотрудник",
+    "PayTypes": "оплата", "OrderDeleted": "удалён",
+}
+СЧИТАЛКИ = {
+    "DishAmountInt": "штук", "DishDiscountSumInt": "выручка",
+    "DishSumInt": "сумма без скидки", "UniqOrderId": "заказов",
+    "ProductCostBase.ProductCost": "себестоимость",
+    "ProductCostBase.Percent": "фудкост",
+    "Cooking.KitchenTime.Avg": "кухня, сек",
+    "OrderTime.AveragePrechequeTime": "до выдачи, мин",
+    "Delivery.WayDurationAvg": "путь, мин",
+}
+МАКС_ДНЕЙ = 92          # дальше запрос тяжелеет, а вопросы такие редки
+
+
+def свободный_запрос(s, разрез, считать, с, по, только_еда=True, отбор=""):
+    """Произвольный разрез OLAP — тот самый «сходи в айку и посмотри».
+
+    Поля проверяются по спискам выше: составляет запрос языковая модель, и
+    единственное, что удерживает её в рамках, — то, что всё незнакомое
+    отвергается здесь, а не исправляется на месте.
+
+    Фильтры отдела и удалённых ставим сами и всегда: без них цифра будет
+    похожа на правду и не будет ею.
+    """
+    разрез = [p for p in (разрез or []) if p in РАЗРЕЗЫ][:3]
+    считать = [p for p in (считать or []) if p in СЧИТАЛКИ][:4]
+    # Отбор по названию — не фильтр Syrve, а отбор строк у себя: в OLAP
+    # для этого нужен точный список значений, а человек говорит «пиццы».
+    # Чтобы было по чему отбирать, имя обязано быть в разрезе.
+    if отбор and not ({"DishName", "DishCategory"} & set(разрез)):
+        разрез = (разрез + ["DishName"])[:3]
+    if not считать:
+        raise ValueError("нечего считать")
+    if (по - с).days > МАКС_ДНЕЙ:
+        raise ValueError(f"период больше {МАКС_ДНЕЙ} дней")
+    фильтры = {**НЕ_УДАЛЁННЫЕ}
+    if только_еда:
+        фильтры.update(ЕДА)
+    body = {"reportType": "SALES", "buildSummary": False,
+            "groupByRowFields": разрез, "aggregateFields": считать,
+            "filters": {"OpenDate.Typed": {"filterType": "DateRange",
+                                           "periodType": "CUSTOM",
+                                           "from": с.isoformat(),
+                                           "to": (по + timedelta(days=1)).isoformat()},
+                        **НАШ_ОТДЕЛ(), **фильтры}}
+    rows = cappi.олап(cappi._post(
+        f"{s.host}/resto/api/v2/reports/olap?key={s.key}", body, timeout=120))
+    if отбор:
+        цель = cappi.norm_full(отбор)
+        rows = [r for r in rows
+                if цель in cappi.norm_full(str(r.get("DishName") or ""))
+                or цель in cappi.norm_full(str(r.get("DishCategory") or ""))]
+    return {"строки": rows, "разрез": разрез, "считать": считать,
+            "с": с, "по": по, "отбор": отбор}
+
+
 def продажи_блюд(s, day, запрос=""):
     """Что продали за день: по категориям и поимённо.
 
