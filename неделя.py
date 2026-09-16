@@ -21,6 +21,7 @@
 вечера, даёт «время доставки» в семь часов и портит среднее так, что оно
 перестаёт что-либо значить.
 """
+import html
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -175,10 +176,15 @@ def отзывы(с, по, ветка=None):
     import urllib.parse
     доп = {"branch": urllib.parse.quote(ветка)} if ветка else {}
     осн = {"from": с.isoformat(), "to": по.isoformat()}
-    всего = report._loopa(**осн, **доп) or {}
-    негатив = report._loopa(**осн, **доп, tone="negative") or {}
-    по_поводам = report._loopa(**осн, **доп, tone="negative",
-                               group_by="category") or {}
+    try:
+        всего = report._loopa(**осн, **доп) or {}
+        негатив = report._loopa(**осн, **доп, tone="negative") or {}
+        по_поводам = report._loopa(**осн, **доп, tone="negative",
+                                   group_by="category") or {}
+    except cappi.ВнешнийСбой as e:
+        # Loopa — один блок из десяти; её отказ не должен ронять таблицу.
+        # Строки про отзывы станут «—», а причина уйдёт под таблицу.
+        return {"отзывы_сбой": str(e)}
     кухня = сервис = 0
     for g in по_поводам.get("groups", []):
         ключи = [k.strip() for k in str(g.get("key", "")).replace(",", " ").split()]
@@ -387,6 +393,10 @@ def нарисовать(d):
         шапка += [f"{report.цвет(доля, report.КРАСНОЕ['выручка'], False)} "
                   f"<b>{_ч(сеть['факт'])} ₴</b> · {доля * 100:.0f}% плана", ""]
     хвост = []
+    сбой = сеть.get("отзывы_сбой") or next(
+        (x.get("отзывы_сбой") for x in колонки if x.get("отзывы_сбой")), None)
+    if сбой:
+        хвост += ["", f"<i>Отзывы не посчитаны: {html.escape(сбой)}.</i>"]
     перенос = сеть.get("перенос", 0)
     if перенос:
         хвост += ["", f"<i>Сверх потерь — перенос на другую точку: "

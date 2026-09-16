@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -755,6 +756,13 @@ def _loopa(**params):
             {"Authorization": f"Bearer {c['LOOPA_TOKEN']}"}, timeout=40))
     except ValueError:
         raise cappi.ВнешнийСбой("Loopa", "ответ не JSON") from None
+    except urllib.error.HTTPError as e:
+        # 16.09.2026 Loopa перестала принимать ключ: 401 на каждый запрос.
+        # Сырой HTTPError ронял экран жалоб в «Сломалось», а KPI молча
+        # писал «нет данных». Отказ доступа — это сбой источника с именем.
+        raise cappi.ВнешнийСбой(
+            "Loopa", "ключ не принят (401) — нужен новый LOOPA_TOKEN"
+            if e.code in (401, 403) else f"HTTP {e.code}") from None
     return cappi.форма(r, dict, "Loopa")
 
 
