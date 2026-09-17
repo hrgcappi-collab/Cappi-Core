@@ -81,10 +81,63 @@ def _get(url, headers=None, timeout=60):
             raise ВнешнийСбой(_сервис(url), str(getattr(e, "reason", e))[:80]) from None
 
 
+СЛЕД = os.path.expanduser("~/.cappi/интеграции.jsonl")
+СЛЕД_СТРОК = 5000
+_след_замок = threading.Lock()
+
+
+def след(сервис, что, **поля):
+    """Строка в журнал интеграций: что спросили и что вернулось.
+
+    По спору «почему в отчёте такая цифра» до этого нельзя было
+    восстановить, что именно ушло в Syrve: журнал был только у цен.
+    Пишем не тело, а суть — отчёт, разрез, период, число строк, время.
+    Ключ сессии из адреса не пишем никогда.
+    """
+    запись = {"когда": time.strftime("%Y-%m-%d %H:%M:%S"), "сервис": сервис,
+              "что": что, **поля}
+    try:
+        with _след_замок:
+            with open(СЛЕД, "a") as f:
+                f.write(json.dumps(запись, ensure_ascii=False) + "\n")
+            # Без предела файл рос бы вечно; хвост в пять тысяч строк —
+            # это около двух недель.
+            if os.path.getsize(СЛЕД) > 1_500_000:
+                строки = open(СЛЕД).read().splitlines()[-СЛЕД_СТРОК:]
+                записать_текст(СЛЕД, "\n".join(строки) + "\n")
+    except Exception:
+        pass
+
+
+def записать_текст(путь, текст):
+    tmp = путь + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(текст)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, путь)
+
+
+def _суть(url, body):
+    """Что за запрос, без ключа: путь и главное из тела."""
+    путь = url.split("/resto/api/")[-1].split("?")[0] if "/resto/api/" in url else _сервис(url)
+    if isinstance(body, dict) and body.get("reportType"):
+        ф = body.get("filters") or {}
+        период = ф.get("OpenDate.Typed") or ф.get("DateTime.Typed") or {}
+        return {"что": f"olap {body['reportType']}",
+                "разрез": body.get("groupByRowFields"),
+                "считать": body.get("aggregateFields"),
+                "период": f"{период.get('from', '')}..{период.get('to', '')}"}
+    if isinstance(body, dict) and "items" in body:
+        return {"что": путь, "строк": len(body.get("items") or [])}
+    return {"что": путь}
+
+
 def _post(url, body, headers=None, timeout=60, попытка=0):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **UA, **(headers or {})})
+    начало = time.time()
     try:
         with _OPENER.open(req, timeout=timeout) as r:
             тело = r.read()
@@ -99,8 +152,15 @@ def _post(url, body, headers=None, timeout=60, попытка=0):
                               f"ответ не JSON: {тело[:80].decode('utf-8', 'replace')}") from None
         if not isinstance(r, (dict, list)):
             raise ВнешнийСбой(_сервис(url), f"ответ не объект: {str(r)[:60]}")
+        суть = _суть(url, body)
+        строк = (len(r.get("data") or []) if isinstance(r, dict) and "data" in r
+                 else len(r) if isinstance(r, list) else None)
+        след(_сервис(url), суть.pop("что"), **суть, строк_ответа=строк,
+             мс=int((time.time() - начало) * 1000))
         return r
     except urllib.error.HTTPError as e:
+        след(_сервис(url), _суть(url, body).get("что"), ошибка=f"HTTP {e.code}",
+             мс=int((time.time() - начало) * 1000))
         if e.code == 429 and попытка < ПОВТОРОВ_ПРИ_429:
             _подождать(попытка)
             return _post(url, body, headers, timeout, попытка + 1)
