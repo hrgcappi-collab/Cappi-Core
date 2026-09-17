@@ -79,7 +79,7 @@ def добавить_спец(код, комментарий=None):
     d = спецпредложения()
     d[str(код)] = {"название": p["name"], "guid": p["id"],
                    "комментарий": комментарий}
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return d[str(код)]
 
 
@@ -88,7 +88,7 @@ def убрать_спец(код):
     if str(код) not in d:
         raise KeyError(код)
     ушло = d.pop(str(код))
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return ушло
 
 

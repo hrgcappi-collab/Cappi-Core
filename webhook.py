@@ -29,6 +29,7 @@
 временем это один факт, а не два.
 """
 import hashlib
+import hmac
 import json
 import os
 import threading
@@ -213,7 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         токен = (cappi.cfg().get("CORE_WEBHOOK_TOKEN") or "").strip()
         дано = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-        if not токен or дано != токен:
+        if not токен or not hmac.compare_digest(дано, токен):
             # 401 — повтор не поможет, пока не поправят токен.
             return self._ответ(401, {"error": "bad token"})
 

@@ -75,7 +75,7 @@ def люди(значение=None):
     if значение is None:
         return d.get("люди", {})
     d["люди"] = значение
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return значение
 
 
@@ -232,7 +232,7 @@ def тайники(месяц=None, значение=None):
     if значение is None:
         return d.get(ключ)
     d[ключ] = значение
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return значение
 
 
@@ -324,7 +324,7 @@ def корректировки(месяц=None, значение=None):
     if значение is None:
         return к.get(ключ, {})
     к[ключ] = значение
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return значение
 
 
@@ -472,7 +472,7 @@ def состояние_запроса(месяц, значение=None):
     if значение is None:
         return з.get(месяц, {})
     з[месяц] = значение
-    json.dump(d, open(ФАЙЛ, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ФАЙЛ, d)
     return значение
 
 

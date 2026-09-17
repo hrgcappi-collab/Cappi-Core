@@ -95,7 +95,7 @@ def load_plan():
 
 
 def save_plan(p):
-    json.dump(p, open(PLAN_FILE, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(PLAN_FILE, p)
 
 
 # Число в конце строки: «58 420», «59004,2», «81305 ₴». Пробел и

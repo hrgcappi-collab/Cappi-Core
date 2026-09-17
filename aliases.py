@@ -108,7 +108,7 @@ def main():
     menu = {code: {"name": p["name"], "price": p["price"], "id": p["id"],
                    "in_menu": p["in_menu"]}
             for code, p in cappi.cloud_prices().items()}
-    json.dump(menu, open(MENU_FILE, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(MENU_FILE, menu)
     print(f"  меню выгружено: {len(menu)} позиций → menu.json")
 
     было = load_manual()
@@ -121,7 +121,7 @@ def main():
         if extra:
             стало[code] = sorted(new | set(extra))
             ручных += len(extra)
-    json.dump(стало, open(ALIAS_FILE, "w"), ensure_ascii=False, indent=1)
+    cappi.записать_json(ALIAS_FILE, стало)
     total = sum(len(v) for v in стало.values())
     print(f"  словарь собран: {total} написаний на {len(стало)} позиций"
           + (f", из них {ручных} вписаны руками" if ручных else ""))

@@ -1,0 +1,19 @@
+id,уровень,блок,описание,файл,статус,часов
+F-01,Critical,E,Доступы из переписки не сменены (Syrve/бот/Loopa/Cloud/OpenAI),ДЛЯ-ЧЕЛОВЕКА.md:6,CONFIRMED,1
+F-02,Major,N,Проверка источников только по кнопке; Loopa 401 узнали от человека,bot.py:651,CONFIRMED,2
+F-03,Major,C,Состояние (KPI/план/спец) пишется неатомарно и без замка,kpi.py:78,CONFIRMED,1.5
+F-04,Major,C,Бэкапа data/ нет,cappi-bot crontab,CONFIRMED,1
+F-05,Major,H,Тело приказа о цене не покрыто тестом; тесты в бой; CI нет,tests/права.py:15,CONFIRMED,3
+F-06,Major,E,Лента разговора с именами/телефонами уходит в OpenAI,мозг.py:190,CONFIRMED,1
+F-07,Minor,A,except: pass на отправке уведомлений; tg() без retry_after,bot.py:1552,CONFIRMED,1
+F-08,Minor,A,Короткие ссылки кнопок: рост без границ и коллизия на 100000,bot.py:149,CONFIRMED,0.3
+F-09,Minor,E,Токен вебхука сравнивается != вместо compare_digest,webhook.py:216,CONFIRMED,0.1
+F-10,Minor,A,Логин BragaD и id маркетолога захардкожены,cappi.py:247,CONFIRMED,0.5
+F-11,Minor,Q,api.env.example без JAMSHUT_SAY_TOKEN и OPENAI_*,api.env.example,CONFIRMED,0.2
+F-12,Minor,N,Контейнер root/rw/все caps — соседний уже ужат,deploy/docker-compose.yml,CONFIRMED,0.3
+F-13,Minor,N,Второй поллер ничем не запрещён,deploy/README.md,CONFIRMED,0.5
+F-14,Minor,F,Экран сайт+glovo 21 с без индикации,bot.py cmd сайт и glovo,CONFIRMED,1
+F-15,Minor,D,Журнал интеграций только для цен,report.py _olap,CONFIRMED,1
+F-16,Nit,A,Дублированный __main__ в selftest,selftest.py:228,CONFIRMED,0.1
+F-17,Nit,H,Python 3.9 локально против 3.12 в проде,README.md,CONFIRMED,0.2
+F-18,Nit,E,диалог.jsonl хранит телефоны 3 дня — упомянуть в README,bugs.py,CONFIRMED,0.1
