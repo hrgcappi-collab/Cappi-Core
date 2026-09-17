@@ -4,7 +4,7 @@
 Запуск:  python3 bot.py
 Конфиг:  ~/.cappi/api.env  (TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS)
 """
-import html, itertools, json, os, re, sys, threading, time, traceback, urllib.parse, urllib.request
+import html, itertools, json, os, re, sys, threading, time, traceback, urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
@@ -1446,7 +1446,14 @@ def _запомнить(раздел, ключи):
     _записать_json(ALERTS, d)
 
 
-МАРКЕТОЛОГ = 770891676     # кому адресован запрос по тайному гостю
+МАРКЕТОЛОГ_ПО_УМОЛЧАНИЮ = 770891676     # пока не задан /people маркетолог_id
+
+
+def _маркетолог():
+    """Кому уходит запрос по тайному гостю. Задаётся `/people маркетолог_id`,
+    как и шеф: личный id в коде — это человек, которого нельзя сменить без
+    выкатки."""
+    return _номер(str(kpi.люди().get("маркетолог_id") or "")) or МАРКЕТОЛОГ_ПО_УМОЛЧАНИЮ
 ШЕФ = None                 # telegram-id шефа; ставится командой /people
 
 
@@ -1548,7 +1555,7 @@ def _просить_тайники(последний):
 
     if действие == "запрос":
         try:
-            say(МАРКЕТОЛОГ, f"🕵️ <b>Тайный гость за {имя_месяца}</b>\n\n"
+            say(_маркетолог(), f"🕵️ <b>Тайный гость за {имя_месяца}</b>\n\n"
                             f"{просьба}\n\nСрок — до {kpi.ДЕДЛАЙН_ДЕНЬ}-го числа.",
                 inline=кнопка)
         except Exception:
@@ -1562,7 +1569,7 @@ def _просить_тайники(последний):
     # что данных нет и KPI посчитать нельзя.
     н = с.get("напоминаний", 0) + 1
     try:
-        say(МАРКЕТОЛОГ, f"⚠️ <b>Просрочено: тайный гость за {имя_месяца}</b>\n"
+        say(_маркетолог(), f"⚠️ <b>Просрочено: тайный гость за {имя_месяца}</b>\n"
                         f"Срок был до {kpi.ДЕДЛАЙН_ДЕНЬ}-го.\n\n{просьба}",
             inline=кнопка)
     except Exception as e:
@@ -5147,6 +5154,8 @@ def on_message(m):
                 + "\n\nПоменять: <code>/people Левітана Ткачук Максим</code>"
                   "\n<code>/people шеф_id 123456789</code> — telegram шефа, "
                   "ему уходит запрос на правку часов 2-го числа."
+                  "\n<code>/people маркетолог_id 123456789</code> — кому "
+                  "уходит запрос по тайному гостю."
                   "\n<i>ФИО бот находит в Syrve сам; это на случай, "
                   "если кого-то не завели вовремя.</i>")
         else:
@@ -5293,6 +5302,14 @@ def main():
         {"command": "kpi", "description": "KPI шефа и су-шефов"},
         {"command": "help", "description": "что умеет бот"},
     ])
+    # Второй процесс на той же машине — не запускаемся вовсе. Между
+    # машинами (ноутбук и сервер) это не поможет — там ловится 409 ниже.
+    import fcntl
+    _замок_экземпляра = open(os.path.join(STATE_DIR, "bot.lock"), "w")
+    try:
+        fcntl.flock(_замок_экземпляра, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit("бот уже запущен на этой машине — второй не нужен")
     print("бот запущен")
     offset = None
     while True:
@@ -5305,6 +5322,19 @@ def main():
                 # Syrve делал бота мёртвым для всех. Теперь каждый чат — своя
                 # очередь, разные чаты — параллельно.
                 _обработать_в_потоке(u)
+        except urllib.error.HTTPError as e:
+            # 409 — Telegram уже отдаёт сообщения другому экземпляру: бот
+            # запущен и на сервере, и на ноутбуке. Половина ответов уйдёт
+            # от старой версии, и по симптомам это «бот через раз».
+            if e.code == 409:
+                print("ВТОРОЙ ЭКЗЕМПЛЯР: Telegram отдаёт сообщения другому "
+                      "процессу с этим токеном — останови лишний")
+                bugs.записать("апи", "второй экземпляр бота забирает сообщения",
+                              где="главный цикл")
+                time.sleep(30)
+            else:
+                print(f"Telegram ответил HTTP {e.code} — пробую снова")
+                time.sleep(5)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             # Обрыв длинного опроса — обычное дело: сеть моргнула, Телеграм
             # закрыл соединение. Печатать на это traceback значит засорять

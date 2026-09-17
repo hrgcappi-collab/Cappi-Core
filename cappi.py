@@ -269,8 +269,12 @@ class Syrve:
     def __init__(self, host=None, login=None, password=None):
         c = cfg()
         self.host = (host or c.get("SYRVE_TP_URL") or "https://cappi.syrve.online").rstrip("/")
-        self.login = login or c.get("SYRVE_TP_LOGIN", "BragaD")
+        self.login = login or c.get("SYRVE_TP_LOGIN", "")
         self.password = password or c.get("SYRVE_TP_PASSWORD", "")
+        # Личный логин умолчанием прятал пустой конфиг: без переменной бот
+        # ходил бы под учёткой сотрудника. Нет логина — нет сессии.
+        if not self.login or not self.password:
+            raise ВнешнийСбой("Syrve", "не заданы SYRVE_TP_LOGIN/SYRVE_TP_PASSWORD")
         self.key = None
 
     def __enter__(self):
@@ -551,7 +555,26 @@ def site_menu(city=SITE_CITY):
     return json.loads(_get(SITE_MENU_URL.format(city=city), timeout=90))
 
 
+_ВИТРИНЫ_КЭШ = {}
+ВИТРИНЫ_ЖИВУТ = 20 * 60      # сайт выгружается раз в 20 минут — чаще смотреть незачем
+
+
+def _из_кэша(ключ, взять):
+    """Цены витрин на 20 минут в памяти: экран «сайт и glovo» ходил за
+    ними 21 секунду при каждом нажатии, а сверка — ещё раз в сутки."""
+    з = _ВИТРИНЫ_КЭШ.get(ключ)
+    if з and time.time() - з[0] < ВИТРИНЫ_ЖИВУТ:
+        return з[1]
+    данные = взять()
+    _ВИТРИНЫ_КЭШ[ключ] = (time.time(), данные)
+    return данные
+
+
 def site_prices(city=SITE_CITY):
+    return _из_кэша(("сайт", city), lambda: _site_prices(city))
+
+
+def _site_prices(city=SITE_CITY):
     """{guid: {name, price, cross}} — сверка по guid, без угадывания по названию.
 
     `cross` — перечёркнутая «старая цена» для бейджа скидки; 0 значит скидки нет.
@@ -573,6 +596,10 @@ def site_prices(city=SITE_CITY):
 
 
 def glovo_prices():
+    return _из_кэша("glovo", _glovo_prices)
+
+
+def _glovo_prices():
     """Цены Glovo с карточек витрины.
 
     У позиции со скидкой на карточке две цены: сначала зачёркнутая старая,

@@ -33,3 +33,16 @@ services:
       # Путь от папки с этим файлом, а не от корня проекта: ./data здесь
       # означало бы deploy/data, и конфиг в контейнер не попал бы.
       - ../data:/root/.cappi
+    # Сервер общий, соседи чужие. Файловая система только для чтения —
+    # бот пишет лишь в ~/.cappi (том) и /tmp; права и capabilities не
+    # нужны: он не слушает привилегированных портов и не меняет систему.
+    # Лимит процессора cgroup у rootless-докера не отдаёт — только память.
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    pids_limit: 128
