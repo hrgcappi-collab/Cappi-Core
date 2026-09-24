@@ -2402,6 +2402,15 @@ def on_button(q):
             return say(chat, "Кнопка устарела — открой экран заново.")
         return cmd_pick_day(chat, _номер(сдвиг) or 0, код)
 
+    if act == "по":                                   # сводка позиций за период
+        код, _, n = arg.partition(":")
+        экран = ЭКРАНЫ_ПЕРИОДА.get(код)
+        дней = _номер(n)
+        if экран is None or дней not in (7, 30):
+            return say(chat, "Кнопка устарела — открой экран заново.")
+        _печатает(chat)
+        return экран(chat, date.today() - timedelta(days=дней - 1), date.today())
+
     if act == "пд":                                   # окно в N дней
         код, _, n = arg.partition(":")
         экран = ЭКРАНЫ_ДНЕЙ.get(код)
@@ -2703,15 +2712,24 @@ def шапка(значок, название, день=None):
     return [строка, ""]
 
 
-def _период(код, day):
-    """Кнопки периода: сегодня · вчера · позавчера · другой день."""
+def _период(код, day, окно=False):
+    """Кнопки периода: сегодня · вчера · позавчера · другой день.
+
+    `окно=True` добавляет ряд «за 7 / 30 дней»: у спецпредложения и акций
+    один день ничего не говорит — позиция может не продаться сегодня и
+    прекрасно идти всю неделю.
+    """
     day = day or date.today()
     ряд = []
     for i, подпись in ((0, "сегодня"), (1, "вчера"), (2, "позавчера")):
         d = date.today() - timedelta(days=i)
         текст = f"• {подпись}" if d == day else подпись
         ряд.append({"text": текст, "callback_data": f"пр:{код}:{d.isoformat()}"})
-    return [ряд, [{"text": "📅 другой день", "callback_data": f"пк:{код}:0"}]]
+    ряды = [ряд, [{"text": "📅 другой день", "callback_data": f"пк:{код}:0"}]]
+    if окно:
+        ряды.append([{"text": f"📆 {n} дней", "callback_data": f"по:{код}:{n}"}
+                     for n in (7, 30)])
+    return ряды
 
 
 def _дни(код, дней):
@@ -3158,14 +3176,15 @@ def cmd_deletions(chat, day=None):
     say(chat, "\n".join(строки), inline=_период("спис", day))
 
 
-def _сводка_позиций(chat, day, позиции, заголовок, пусто, inline=None):
+def _сводка_позиций(chat, day, позиции, заголовок, пусто, inline=None, по=None):
     if not позиции:
         return say(chat, пусто, inline=inline)
     _печатает(chat)
     with cappi.Syrve() as s:
-        св = promo.сводка(s, day, позиции)
+        св = promo.сводка(s, day, позиции, по)
     m = report.money
-    строки = [f"<b>{заголовок} · {day:%d.%m}</b>",
+    когда = f"{day:%d.%m}" if not по or по == day else f"{day:%d.%m}–{по:%d.%m}"
+    строки = [f"<b>{заголовок} · {когда}</b>",
               f"<b>{m(св['сумма'])} ₴</b> · {св['штук']:.0f} шт · {св['доля']:.0f}% выручки"]
     for x in [x for x in св["позиции"] if x["штук"]][:12]:
         скидка = f" · −{x['процент']:.0f}%" if x.get("процент") else ""
@@ -3177,7 +3196,7 @@ def _сводка_позиций(chat, day, позиции, заголовок, 
     say(chat, "\n".join(строки), inline=inline)
 
 
-def cmd_promo(chat, day=None):
+def cmd_promo(chat, day=None, по=None):
     """Акционные — те, у кого на сайте перечёркнута старая цена."""
     try:
         позиции = promo.акционные()
@@ -3187,10 +3206,10 @@ def cmd_promo(chat, day=None):
     _сводка_позиций(chat, day, позиции,
                     "Акции",
                     "<b>Акции</b> · на сайте нет позиций со скидкой",
-                    inline=_период("акц", day))
+                    inline=_период("акц", day, окно=True), по=по)
 
 
-def cmd_special(chat, day=None):
+def cmd_special(chat, day=None, по=None):
     """Спецпредложение — ручной список артикулов."""
     d = promo.спецпредложения()
     day = day or date.today()
@@ -3199,16 +3218,26 @@ def cmd_special(chat, day=None):
             _await[chat] = {"what": "special"}
             return say(chat, "Спецпредложение пустое.\n\n"
                              "Пришли артикул — добавлю. Например <code>03275</code>.\n"
-                             "<i>Можно с пометкой: 03275 новинка сентября</i>")
+                             "<i>Можно несколько сразу — в столбик или через пробел. "
+                             "С пометкой: 03275 новинка сентября</i>")
         return say(chat, "Спецпредложение пустое.")
     позиции = [{"код": к, "название": v["название"], "guid": v.get("guid")}
                for к, v in d.items()]
     _сводка_позиций(chat, day, позиции, "⭐ Спецпредложение", "",
-                    inline=_период("спец", day))
+                    inline=_период("спец", day, окно=True), по=по)
     if access.можно(chat, "цены"):
+        # Ждём артикул и когда список не пуст: раньше мастер открывался
+        # только на пустом списке, и присланный код молча пропадал
+        # (24.09.2026 — три артикула подряд без единого ответа).
+        _await[chat] = {"what": "special"}
         say(chat, "Убрать позицию:", inline=[
             [{"text": f"🗑 {к} · {v['название'][:26]}", "callback_data": f"sx:{к}"}]
             for к, v in d.items()])
+        say(chat, "<i>Добавить — пришли артикул. Можно несколько: "
+                  "в столбик или через пробел.</i>")
+
+
+КОД_АРТИКУЛА = re.compile(r"^\d{3,6}$")
 
 
 def cmd_special_add(chat, args):
@@ -3217,6 +3246,24 @@ def cmd_special_add(chat, args):
     if not args:
         return say(chat, "Формат: <code>/special 03275</code>\n"
                          "С пометкой: <code>/special 03275 новинка сентября</code>")
+    # Несколько артикулов за раз: люди присылают их столбиком, и разбирать
+    # только первый значит молча потерять остальные.
+    коды = [a for a in args if КОД_АРТИКУЛА.match(a.strip())]
+    if len(коды) > 1:
+        добавлено, беды = [], []
+        for к in коды:
+            try:
+                добавлено.append(promo.добавить_спец(к, None)["название"])
+            except promo.НетТакогоАртикула:
+                беды.append(к)
+        строки = []
+        if добавлено:
+            строки.append(f"⭐ Добавлено: <b>{len(добавлено)}</b>")
+            строки += [f"    {э(н)}" for н in добавлено]
+        if беды:
+            строки.append(f"❌ Нет в меню: {', '.join(беды)}")
+        _await[chat] = {"what": "special"}
+        return say(chat, "\n".join(строки))
     код = re.sub(r"\D", "", args[0])
     try:
         v = promo.добавить_спец(код, " ".join(args[1:]) or None)
@@ -4657,6 +4704,8 @@ def цена_новому(chat, c, who):
     "смен": lambda chat, d: cmd_shift(chat, d),
 })
 ЭКРАНЫ_ДНЕЙ = {"ист": cmd_jam_history, "кто": cmd_jam_who, "прав": cmd_shift_edits}
+# Экраны, которые умеют показать свод за период, а не за один день.
+ЭКРАНЫ_ПЕРИОДА = {"спец": cmd_special, "акц": cmd_promo}
 
 
 BUTTONS = {
