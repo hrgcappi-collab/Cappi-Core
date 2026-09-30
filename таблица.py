@@ -17,6 +17,7 @@
 """
 import datetime as dt
 import json
+import urllib.error
 import urllib.request
 
 import cappi
@@ -40,6 +41,23 @@ def _лист():
     return cappi.cfg().get("PLAN_SHEET_LIST") or ЛИСТ_ПО_УМОЛЧАНИЮ
 
 
+class _БезРедиректа(urllib.request.HTTPRedirectHandler):
+    """Редирект не автоматический: за ним идём сами.
+
+    Apps Script на POST отвечает 302 на script.googleusercontent.com, а
+    urllib тащит на редирект заголовки исходного запроса — Content-Type и
+    Content-Length от тела, которого в GET уже нет. Google отвечает на это
+    404, и выглядит оно как «скрипт удалён», хотя скрипт жив: тот же адрес
+    на GET отдаёт 200. Поэтому идём по Location вручную и чистым запросом.
+    """
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_ОТКРЫВАТЕЛЬ = urllib.request.build_opener(_БезРедиректа)
+
+
 def _послать(тело, timeout=120):
     """Запрос к скрипту книги. Ответ всегда JSON — даже отказ."""
     c = cappi.cfg()
@@ -50,8 +68,17 @@ def _послать(тело, timeout=120):
         c["PLAN_SHEET_URL"], data=json.dumps(тело, ensure_ascii=False).encode(),
         headers={"Content-Type": "application/json", **cappi.UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            сырое = r.read()
+        try:
+            with _ОТКРЫВАТЕЛЬ.open(req, timeout=timeout) as r:
+                сырое = r.read()
+        except urllib.error.HTTPError as e:
+            куда = e.headers.get("Location") if e.code in (301, 302, 303, 307) else None
+            if not куда:
+                raise
+            with _ОТКРЫВАТЕЛЬ.open(
+                    urllib.request.Request(куда, headers=dict(cappi.UA)),
+                    timeout=timeout) as r:
+                сырое = r.read()
     except Exception as e:
         raise cappi.ВнешнийСбой("Таблица", str(getattr(e, "reason", e))[:80]) from None
     try:
