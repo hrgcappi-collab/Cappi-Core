@@ -53,4 +53,40 @@ for день in ДАТЫ:
         print(f"  {'✅' if ок else '❌'} {имя:<18} экран {экран:>12,.2f} · Syrve {эталон:>12,.2f}"
               + ("" if ок else f"  расхождение {рас:,.2f}"))
 print(f"\nрасхождений: {провал}")
+
+# Полнота словаря концепций. Концепция, которой нет в КОНЦЕПЦИИ, молча
+# выпадает из разбивки по филиалам, оставаясь в общем итоге: сумма строк
+# перестаёт сходиться с числом над ними, и выглядит это как пропажа денег,
+# а не как незаполненный словарь. Спрашиваем широкий период — концепция
+# может месяцами молчать и ожить, как «Борщик».
+print("\nполнота словаря концепций (за год):")
+from datetime import timedelta as _td
+_по = date.today()
+_с = _по - _td(days=365)
+with cappi.Syrve() as s:
+    _r = cappi._post(
+        f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
+        {"reportType": "TRANSACTIONS", "buildSummary": False,
+         "groupByRowFields": ["Conception"],
+         "aggregateFields": ["Sum.Incoming", "Sum.Outgoing"],
+         "filters": {"DateTime.DateTyped": {
+             "filterType": "DateRange", "periodType": "CUSTOM",
+             "from": _с.isoformat(), "to": (_по + _td(days=1)).isoformat()},
+             "Account.Name": {"filterType": "IncludeValues",
+                              "values": list(report.СЧЕТА_ВЫРУЧКИ)}}},
+        timeout=90)
+_чужие = []
+for _x in cappi.олап(_r):
+    _имя = _x.get("Conception")
+    _сум = (_x.get("Sum.Outgoing") or 0) - (_x.get("Sum.Incoming") or 0)
+    if abs(_сум) < 1:
+        continue
+    if _имя not in report.КОНЦЕПЦИИ:
+        _чужие.append((_имя, _сум))
+for _имя, _сум in _чужие:
+    print(f"  ❌ «{_имя}» нет в КОНЦЕПЦИИ — {_сум:,.0f} ₴ выпадает из разбивки")
+if not _чужие:
+    print("  ✅ все концепции с выручкой разобраны")
+провал += len(_чужие)
+
 sys.exit(1 if провал else 0)
