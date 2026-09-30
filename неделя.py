@@ -172,15 +172,30 @@ def админы(с, по):
 
 
 def отзывы(с, по, ветка=None):
-    """Негатив Loopa: всего, доля и разрез кухня/сервис."""
+    """Негатив Loopa: всего, доля и разрез кухня/сервис.
+
+    У Лазаревой в Loopa два имени — «Лазарева» и «Болтенка», — поэтому
+    спрашиваем по каждому и складываем. Один запрос по одному имени давал
+    за сентябрь 10 отзывов вместо 348: половина филиала просто не
+    находилась (30.09.2026).
+    """
     import urllib.parse
-    доп = {"branch": urllib.parse.quote(ветка)} if ветка else {}
     осн = {"from": с.isoformat(), "to": по.isoformat()}
+    имена = report.ФИЛИАЛ_LOOPA.get(ветка, (ветка,)) if ветка else (None,)
+    запросы = [{"branch": urllib.parse.quote(и)} if и else {} for и in имена]
     try:
-        всего = report._loopa(**осн, **доп) or {}
-        негатив = report._loopa(**осн, **доп, tone="negative") or {}
-        по_поводам = report._loopa(**осн, **доп, tone="negative",
-                                   group_by="category") or {}
+        всего = негатив = 0
+        поводы = {}
+        for доп in запросы:
+            всего += (report._loopa(**осн, **доп) or {}).get("total", 0)
+            негатив += (report._loopa(**осн, **доп, tone="negative") or {}).get("total", 0)
+            for g in (report._loopa(**осн, **доп, tone="negative",
+                                    group_by="category") or {}).get("groups", []):
+                к = str(g.get("key", ""))
+                поводы[к] = поводы.get(к, 0) + (g.get("count") or 0)
+        по_поводам = {"groups": [{"key": к, "count": n} for к, n in поводы.items()]}
+        всего = {"total": всего}
+        негатив = {"total": негатив}
     except cappi.ВнешнийСбой as e:
         # Loopa — один блок из десяти; её отказ не должен ронять таблицу.
         # Строки про отзывы станут «—», а причина уйдёт под таблицу.
