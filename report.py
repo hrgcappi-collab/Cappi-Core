@@ -388,17 +388,27 @@ def orders_count(s, day):
 # 827, и «блюда на заказ» выросло с 3,9 до 5,66; 02.09 таких было 1 379.
 # Из количества их вычитаем, из выручки — нет.
 СЛУЖЕБНЫЕ_ШТУКИ = {"02927"}          # Опен-фуд
+# Добавки блюдами не считаются: пакетик васабі и набор «соєвий + імбир» —
+# не еда, а приложение к ней. За август их 4 136 штук при 9 896 настоящих
+# блюд, то есть почти треть «блюд» была соусами. Заказчик в своей таблице
+# их тоже не считает: у него за август 10 385 против наших 18 825.
+СЛУЖЕБНЫЕ_КАТЕГОРИИ = {"Б_Каппи_Добавки"}
 
 
 def _служебных_штук(s, day):
-    """Сколько штук за день пробито позициями со свободной ценой."""
-    if not СЛУЖЕБНЫЕ_ШТУКИ:
-        return 0
-    rows = _olap(s, day, ["DishCode"], ["DishAmountInt"],
-                 {**НЕ_УДАЛЁННЫЕ,
-                  "DishCode": {"filterType": "IncludeValues",
-                               "values": sorted(СЛУЖЕБНЫЕ_ШТУКИ)}})
-    return sum(r.get("DishAmountInt") or 0 for r in rows)
+    """Штуки, которые не блюда: свободная цена и добавки."""
+    итог = 0
+    if СЛУЖЕБНЫЕ_ШТУКИ:
+        итог += sum(r.get("DishAmountInt") or 0 for r in _olap(
+            s, day, ["DishCode"], ["DishAmountInt"],
+            {**НЕ_УДАЛЁННЫЕ, "DishCode": {"filterType": "IncludeValues",
+                                          "values": sorted(СЛУЖЕБНЫЕ_ШТУКИ)}}))
+    if СЛУЖЕБНЫЕ_КАТЕГОРИИ:
+        итог += sum(r.get("DishAmountInt") or 0 for r in _olap(
+            s, day, ["DishCategory"], ["DishAmountInt"],
+            {**НЕ_УДАЛЁННЫЕ, "DishCategory": {"filterType": "IncludeValues",
+                                              "values": sorted(СЛУЖЕБНЫЕ_КАТЕГОРИИ)}}))
+    return итог
 
 
 def sales(s, day):
