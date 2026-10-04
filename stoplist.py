@@ -51,6 +51,23 @@ def список():
     d = cappi.форма(_post("stop_lists", {"organizationIds": [c["SYRVE_ORG_ID"]]}),
                     dict, "Syrve Cloud")
     меню = {p["id"]: p for p in cappi.cloud_menu() if isinstance(p, dict) and "id" in p}
+    # В стопе бывает то, чего нет в меню доставки: оно короче номенклатуры
+    # вчетверо (323 против 1470), и всё, что продаётся только в зале или
+    # стоит без цены, туда не попадает. 02.10.2026 из 31 строки стопа 12
+    # показывались как «неизвестная позиция — 0 ₴»: шесть из них спокойно
+    # находились в номенклатуре ТП — кола, мочі, окрошка.
+    _ном = {}
+
+    def _из_номенклатуры():
+        if not _ном:
+            try:
+                with cappi.Syrve() as s:
+                    _ном.update({p["id"]: p for p in s.products()
+                                 if isinstance(p, dict) and "id" in p})
+            except Exception:
+                _ном["—"] = {}      # не вышло — больше не пробуем
+        return _ном
+
     точки = терминалы()
     out = []
     for группа in (d.get("terminalGroupStopLists") or []):
@@ -66,10 +83,18 @@ def список():
                 pid = it.get("productId")
                 p = меню.get(pid) or {}
                 цена = ((p.get("sizePrices") or [{}])[0].get("price") or {}).get("currentPrice")
+                имя, код = p.get("name"), p.get("code")
+                if not имя:
+                    из_ном = _из_номенклатуры().get(pid) or {}
+                    имя = (из_ном.get("name") or "").strip() or None
+                    код = код or (из_ном.get("num") or "").strip() or None
                 out.append({
                     "productId": pid,
-                    "название": p.get("name") or "неизвестная позиция",
-                    "код": p.get("code"),
+                    # Совсем не нашлась — показываем хвост guid, а не
+                    # «неизвестная позиция»: по нему хотя бы можно найти её
+                    # в Syrve, а по слову «неизвестная» — нечего.
+                    "название": имя or f"не в номенклатуре · {str(pid)[:8]}",
+                    "код": код,
                     "цена": цена,
                     "terminalGroupId": tid,
                     "точка": точки.get(tid, "?"),
