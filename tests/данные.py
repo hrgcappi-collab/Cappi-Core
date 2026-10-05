@@ -56,7 +56,11 @@ for день in ДАТЫ:
         эт_время={}
         for r in вр:
             т=report.ТОЧКИ.get(r.get("RestaurantSection"))
-            if т: эт_время[т]=(r.get("Cooking.KitchenTime.Avg") or 0)/60 + (r.get("OrderTime.AveragePrechequeTime") or 0)
+            # Пречек — это кухня плюс сборка, то есть время до передачи
+            # курьеру. Полное время заказа = пречек + дорога. Складывать
+            # кухню с пречеком значит посчитать кухню дважды: так было в
+            # коде до 05.10.2026 и завышало итог на 8–11 минут.
+            if т: эт_время[т]=(r.get("OrderTime.AveragePrechequeTime") or 0) + (r.get("Delivery.WayDurationAvg") or 0)
         см=report.attendance(s, день)
     сверка=[("заказов", d["чеков"], эт_заказов, 0),
             ("блюд", d["продажи"]["блюда_и_товары"]["штук"], эт_блюд, 0),
