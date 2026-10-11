@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 if pgrep -f "Cappi-Core/bot.py" >/dev/null 2>&1; then
     echo "локальный bot.py запущен — второй поллер поделит сообщения с сервером"; exit 1
 fi
-for t in tests/приказ.py tests/права.py tests/непонятые.py selftest.py; do
+for t in tests/приказ.py tests/таблица.py tests/права.py tests/непонятые.py selftest.py; do
     echo "== $t"; python3 "$t" >/tmp/выкатка.log 2>&1 || { tail -15 /tmp/выкатка.log; echo "❌ $t красный — не выкатываю"; exit 1; }
     tail -1 /tmp/выкатка.log
 done
