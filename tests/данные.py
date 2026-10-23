@@ -49,18 +49,32 @@ for день in ДАТЫ:
             _r=олап(s,[], ["DishAmountInt"], день, {**report.НЕ_УДАЛЁННЫЕ, **_ф})
             эт_блюд-=(_r[0].get("DishAmountInt") if _r else 0) or 0
         эт_выручка=report.выручка_пиу(s, день, день)["всего"]
-        # время: кухня в секундах, пречек и путь в минутах
-        вр=олап(s,["RestaurantSection"],
-                ["Cooking.KitchenTime.Avg","OrderTime.AveragePrechequeTime","Delivery.WayDurationAvg"],
-                день, report.ТОЛЬКО_БЛЮДА())
-        эт_время={}
+        # Время считаем из отметок каждого заказа, своей арифметикой.
+        #
+        # Средние Syrve для этого не годятся, и на этом уже дважды обожглись:
+        # «время в пречеке» — окно ПОСЛЕ печати пречека, кухни в нём нет;
+        # кухня усредняется по блюдам, а пречек по заказам; путь
+        # усредняется по всем заказам, включая самовывоз без дороги.
+        # Правило пишем здесь прямо: итог = от открытия заказа до вручения.
+        from datetime import datetime as _дт
+        вр=олап(s,["OrderNum","RestaurantSection","OpenTime","Delivery.ActualTime"],
+                ["UniqOrderId"], день,
+                {**report.ТОЛЬКО_БЛЮДА(),
+                 "OrderType":{"filterType":"IncludeValues",
+                              "values":[report.ТИП_ДОСТАВКИ]}})
+        _соб={}
         for r in вр:
-            т=report.ТОЧКИ.get(r.get("RestaurantSection"))
-            # Пречек — это кухня плюс сборка, то есть время до передачи
-            # курьеру. Полное время заказа = пречек + дорога. Складывать
-            # кухню с пречеком значит посчитать кухню дважды: так было в
-            # коде до 05.10.2026 и завышало итог на 8–11 минут.
-            if т: эт_время[т]=(r.get("OrderTime.AveragePrechequeTime") or 0) + (r.get("Delivery.WayDurationAvg") or 0)
+            т=report.ТОЧКИ.get(report.СЛИВАТЬ.get(r.get("RestaurantSection"),
+                                                  r.get("RestaurantSection")))
+            if not т: continue
+            try:
+                o=_дт.fromisoformat(str(r.get("OpenTime")).split(".")[0])
+                a=_дт.fromisoformat(str(r.get("Delivery.ActualTime")).split(".")[0])
+            except (ValueError, TypeError):
+                continue
+            м=(a-o).total_seconds()/60
+            if 0 <= м <= 240: _соб.setdefault(т,[]).append(м)
+        эт_время={т:sum(v)/len(v) for т,v in _соб.items() if v}
         см=report.attendance(s, день)
     сверка=[("заказов", d["чеков"], эт_заказов, 0),
             ("блюд", d["продажи"]["блюда_и_товары"]["штук"], эт_блюд, 0),
