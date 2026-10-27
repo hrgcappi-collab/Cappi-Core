@@ -46,3 +46,7 @@ cappi._get, cappi._post = родной_get, родной_post
 print("ИТОГ:", исход, flush=True)
 import collections
 for (м,э,т),n in collections.Counter(плохие).most_common(20): print(f"  {n}× {э:<22} [{м}] {т}")
+
+# Провал — только «Сломалось» и молчание: названная причина отказа это
+# правильное поведение, ради него тест и написан.
+sys.exit(1 if исход["СЛОМАЛОСЬ"] or исход["молчит"] else 0)
