@@ -88,7 +88,7 @@ _lock = threading.Lock()
                    ["📅 Выбрать день", "📅 Неделя"],
                    ["🎯 План", "⏱ Время работы"],
                    ["🗺 Зоны", "😠 Жалобы"],
-                   ["💳 Онлайн-оплаты"],
+                   ["💳 Онлайн-оплаты", "💳 За месяц"],
                    ["◀️ Назад", "🐞 Ошибка"]],
     # Персонал — про людей на смене. Отдельно от показателей: там про
     # деньги, здесь про тех, кто их зарабатывает, и вопросы разные.
@@ -155,6 +155,23 @@ def tg(method, **params):
             except Exception:
                 пауза = 1
             time.sleep(min(пауза, 30))
+
+
+def tg_файл(chat, имя, данные, подпись=""):
+    """Отправить файл документом. sendDocument требует multipart — urlencode
+    тут не годится, поэтому тело собираем руками."""
+    граница = f"----cappi{int(time.time() * 1000)}"
+    части = []
+    for k, v in (("chat_id", str(chat)), ("caption", подпись)):
+        части.append(f'--{граница}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
+    части.append(f'--{граница}\r\nContent-Disposition: form-data; name="document"; '
+                 f'filename="{urllib.parse.quote(имя)}"; filename*=UTF-8\'\'{urllib.parse.quote(имя)}\r\n'
+                 f'Content-Type: text/csv\r\n\r\n'.encode() + данные + b"\r\n")
+    части.append(f"--{граница}--\r\n".encode())
+    req = urllib.request.Request(f"{API}/sendDocument", data=b"".join(части),
+                                 headers={"Content-Type": f"multipart/form-data; boundary={граница}"})
+    with urllib.request.urlopen(req, timeout=70) as r:
+        return json.loads(r.read())
 
 
 def ссылка(*части):
@@ -2204,6 +2221,64 @@ def _pull_zones(последний):
         traceback.print_exc()
 
 
+МОНО_УТРО = "11:00"   # после 10:15, когда сайт отдаёт ночные предзаказы в Syrve
+
+
+def _watch_оплаты(последний):
+    """Онлайн-оплаты mono за сегодня: о новом расхождении — сразу.
+
+    Раз в полчаса. Сообщаем только о том, чему больше часа (см.
+    mono.тревоги), и каждое — один раз: ключ запоминается до конца дня.
+    """
+    if time.time() - последний[0] < 1800:
+        return
+    последний[0] = time.time()
+    сегодня = date.today()
+    try:
+        новые_всё = mono.тревоги(сегодня)
+    except Exception as e:
+        bugs.сбой("сверка mono", e)
+        return
+    было = _виденное(f"моно:{сегодня}")
+    новые = [r for r in новые_всё if mono.ключ(r) not in было]
+    if not новые:
+        return
+    строки = [f"💳 <b>Онлайн-оплаты не сходятся с Syrve: {len(новые)}</b>"]
+    строки += [э(mono.проблема(r)) for r in новые]
+    for uid in настройки.получатели("оплаты", access.подписчики_отчёта()):
+        try:
+            say(uid, "\n".join(строки), inline=_период("моно", сегодня))
+        except Exception:
+            traceback.print_exc()
+    _запомнить(f"моно:{сегодня}", было | {mono.ключ(r) for r in новые})
+
+
+def _утро_оплаты(последний):
+    """Утром: сохранить вчера (и всё, что Cloud ещё помнит) и прислать
+    вчерашние расхождения. Если всё сошлось — молчим."""
+    вчера = date.today() - timedelta(days=1)
+    if (datetime.now().strftime("%H:%M") < МОНО_УТРО
+            or вчера.isoformat() in _виденное("моно_утро")
+            or time.time() - последний[0] < 900):
+        return
+    последний[0] = time.time()
+    try:
+        mono.досохранить(вчера)
+        строки = mono.день_из_истории(вчера) or []
+    except Exception as e:
+        bugs.сбой("сверка mono утром", e)
+        return
+    if any(r["статус"] in mono.ПРОБЛЕМЫ for r in строки):
+        текст = mono.описать(вчера, date.today(), строки, э=э)
+        заголовок, _, тело = текст.partition("\n")
+        for uid in настройки.получатели("оплаты", access.подписчики_отчёта()):
+            try:
+                say(uid, f"💳 <b>{э(заголовок)}</b>\n{тело}", inline=_период("моно", вчера))
+            except Exception:
+                traceback.print_exc()
+    _запомнить("моно_утро", [вчера.isoformat()])
+
+
 def watcher():
     """Догоняет проверки, опрашивает Джамшута и стоп-лист, шлёт итоги дня."""
     sent = {}
@@ -2217,6 +2292,8 @@ def watcher():
     последняя_негода = [0.0]
     последняя_чистка = [0.0]
     последний_правки = [0.0]      # свой таймер: общий с тайниками не срабатывал
+    последняя_оплата = [0.0]
+    последнее_утро = [0.0]
     while True:
         try:
             _send_daily(sent)
@@ -2224,6 +2301,8 @@ def watcher():
             _send_ritual()
             _send_ai_daily(sent)
             _send_ai_weekly()
+            _утро_оплаты(последнее_утро)
+            _watch_оплаты(последняя_оплата)
             _подчистить_журналы(последняя_чистка)
             _просить_тайники(последний_тайник)
             _просить_корректировки(последний_правки)
@@ -2678,6 +2757,12 @@ def on_button(q):
             return say(chat, f"{d:%d.%m} ещё не наступило.")
         _печатает(chat)
         return экран(chat, d)
+
+    if act in ("мм", "мф"):                           # онлайн-оплаты за месяц / файл
+        м = _месяц_из(arg)
+        if м is None or м > date.today():
+            return say(chat, "Кнопка устарела — открой экран заново.")
+        return cmd_mono_месяц(chat, м) if act == "мм" else cmd_mono_файл(chat, м)
 
     if act == "пк":                                   # календарь для этого экрана
         код, _, сдвиг = arg.partition(":")
@@ -3244,6 +3329,81 @@ def cmd_mono(chat, day=None):
     текст = mono.описать(day, day + timedelta(days=1), строки, э=э)
     заголовок, _, тело = текст.partition("\n")
     say(chat, f"💳 <b>{э(заголовок)}</b>\n{тело}", inline=_период("моно", day))
+
+
+_ИМЯ_МЕСЯЦА = ("", "январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+          "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+
+
+def _месяц_из(текст):
+    try:
+        г, м = (int(x) for x in str(текст).split("-"))
+        return date(г, м, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _кнопки_месяца(м):
+    пред = (м - timedelta(days=1)).replace(day=1)
+    след = (м + timedelta(days=32)).replace(day=1)
+    ряд = [{"text": f"◀️ {_ИМЯ_МЕСЯЦА[пред.month]}", "callback_data": f"мм:{пред:%Y-%m}"}]
+    if след <= date.today():
+        ряд.append({"text": f"{_ИМЯ_МЕСЯЦА[след.month]} ▶️", "callback_data": f"мм:{след:%Y-%m}"})
+    return [ряд, [{"text": "📎 Таблица для Excel", "callback_data": f"мф:{м:%Y-%m}"}]]
+
+
+def cmd_mono_месяц(chat, м=None):
+    """Онлайн-оплаты за месяц — из сохранённых дней.
+
+    Cloud помнит заказы неделю, поэтому месяц собирается не запросом, а
+    из истории, которую бот пишет каждое утро. Дни, которых в истории
+    нет, называем прямо — иначе сумма за месяц тихо врала бы.
+    """
+    if not access.можно(chat, "показатели"):
+        return say(chat, "Сверка оплат — это деньги, нужен доступ к "
+                         "показателям. У тебя его нет.")
+    м = (м or date.today()).replace(day=1)
+    _печатает(chat)
+    if м.year == date.today().year and м.month == date.today().month:
+        try:
+            mono.досохранить()       # чтобы последние дни были в истории
+        except Exception:
+            traceback.print_exc()
+    строки, пропущены = mono.месяц(м.year, м.month)
+    деньги = [r["оплата"] for r in строки if r["оплата"]]
+    проблемы = [r for r in строки if r["статус"] in mono.ПРОБЛЕМЫ]
+    out = [f"💳 <b>Онлайн-оплаты · {_ИМЯ_МЕСЯЦА[м.month]} {м.year}</b>"]
+    if not строки:
+        out.append("За этот месяц сохранённых сверок нет.")
+    else:
+        дней = len({r["оплата"]["время"].date() for r in строки if r["оплата"]})
+        out.append(f"Оплат: <b>{len(деньги)}</b> на <b>{mono._грн(sum(о['сумма'] for о in деньги))}</b>"
+                   f" · комиссия {mono._грн(sum(о['комиссия'] for о in деньги))} · дней {дней}")
+        out.append(f"Сошлось: {len(строки) - len(проблемы)}"
+                   + (f" · расхождений <b>{len(проблемы)}</b>" if проблемы else " · расхождений нет ✅"))
+        по_типам = {}
+        for r in проблемы:
+            по_типам[r["статус"]] = по_типам.get(r["статус"], 0) + 1
+        for ст, n in sorted(по_типам.items(), key=lambda x: -x[1]):
+            out.append(f"    {mono.ЗНАЧКИ[ст]} {mono.ПОЯСНЕНИЕ[ст]} — {n}")
+        if проблемы:
+            out.append("")
+            out += [э(mono.проблема(r)) for r in sorted(проблемы, key=mono._когда)]
+    if пропущены:
+        out.append(f"\n<i>Нет в истории: {', '.join(f'{д:%d.%m}' for д in пропущены[:10])}"
+                   + (f" и ещё {len(пропущены) - 10}" if len(пропущены) > 10 else "")
+                   + ". Syrve Cloud помнит заказы неделю — эти дни уже не сверить.</i>")
+    say(chat, "\n".join(out), inline=_кнопки_месяца(м))
+
+
+def cmd_mono_файл(chat, м):
+    if not access.можно(chat, "показатели"):
+        return say(chat, "Нужен доступ к показателям.")
+    строки, _ = mono.месяц(м.year, м.month)
+    if not строки:
+        return say(chat, "За этот месяц сохранённых сверок нет.")
+    tg_файл(chat, f"mono-{м:%Y-%m}.csv", mono.в_csv(строки),
+            f"Онлайн-оплаты mono ↔ Syrve, {_ИМЯ_МЕСЯЦА[м.month]} {м.year}")
 
 
 def _отказ(m, текст):
@@ -5161,6 +5321,7 @@ BUTTONS = {
     "🗺 зоны": cmd_zones,
     "😠 жалобы": cmd_complaints,
     "💳 онлайн-оплаты": cmd_mono,
+    "💳 за месяц": lambda chat: cmd_mono_месяц(chat),
 
     # модуль «Админка»
     "🔌 проверка связи": cmd_healthcheck,
