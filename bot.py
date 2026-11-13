@@ -3330,7 +3330,7 @@ def cmd_mono(chat, day=None):
     day = day or date.today() - timedelta(days=1)
     _печатает(chat)
     try:
-        строки = mono.сверить(day)
+        строки = mono.день(day)
     except mono.СлишкомСтаро as e:
         return say(chat, f"💳 {э(e)}", inline=_кнопки_оплат(day))
     say(chat, mono.описать(day, day + timedelta(days=1), строки, э=э),
