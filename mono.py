@@ -520,6 +520,156 @@ def в_csv(строки):
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
+# ------------------------------------------------------------------- xlsx
+# Настоящий Excel, а не CSV: на телефоне CSV открывается текстом, а в
+# Excel — узкими колонками без выделения. Библиотек нет (бот живёт на
+# стандартной), поэтому файл собран руками: xlsx — это zip с XML внутри.
+# Строки — inline, без таблицы общих строк: так проще и для 300 строк
+# размер не важен.
+
+_КОЛОНКИ = [  # (заголовок, ширина, тип)
+    ("Дата", 11, "т"), ("Время оплаты", 9, "т"), ("Филиал", 11, "т"),
+    ("Статус", 38, "т"), ("Сумма оплаты", 13, "₴"), ("Комиссия", 11, "₴"),
+    ("Заказ №", 9, "ч"), ("Оплаты в Syrve", 44, "т"), ("Сумма заказа", 13, "₴"),
+    ("Доставка", 12, "т"), ("Отмена", 22, "т"), ("Карта", 18, "т"),
+    ("Инвойс mono", 23, "т"),
+]
+
+# Стили по номеру: 0 обычный, 1 заголовок, 2 деньги, 3 текст-расхождение,
+# 4 деньги-расхождение, 5 итог текст, 6 итог деньги, 7 число, 8 число-расхождение.
+_СТИЛИ = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts>
+<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="4"><fill><patternFill patternType="none"/></fill>
+<fill><patternFill patternType="gray125"/></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFE7ECF3"/><bgColor indexed="64"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFFBE0E0"/><bgColor indexed="64"/></patternFill></fill></fills>
+<borders count="2"><border/><border><top style="thin"><color rgb="FF999999"/></top></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="9">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="164" fontId="0" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>
+<xf numFmtId="164" fontId="1" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>
+<xf numFmtId="1" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+<xf numFmtId="1" fontId="0" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>
+</cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>"""
+
+
+def _буква(i):
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _ячейка(адрес, значение, стиль):
+    from xml.sax.saxutils import escape
+    if значение is None or значение == "":
+        return f'<c r="{адрес}" s="{стиль}"/>'
+    if isinstance(значение, tuple):            # ("f", формула, значение)
+        return (f'<c r="{адрес}" s="{стиль}"><f>{escape(значение[1])}</f>'
+                f'<v>{значение[2]}</v></c>')
+    if isinstance(значение, (int, float)):
+        return f'<c r="{адрес}" s="{стиль}"><v>{значение}</v></c>'
+    return (f'<c r="{адрес}" s="{стиль}" t="inlineStr"><is><t xml:space="preserve">'
+            f'{escape(str(значение))}</t></is></c>')
+
+
+def в_xlsx(строки, лист="Онлайн-оплаты"):
+    """Таблица месяца в .xlsx: шапка закреплена, фильтр, расхождения красным,
+    внизу итог формулами — Excel пересчитает, если строки отфильтровать."""
+    import io, zipfile
+    from xml.sax.saxutils import escape
+    ряды = [[(з, 1) for з, _, _ in _КОЛОНКИ]]
+    for r in sorted(строки, key=_когда):
+        о, з = r["оплата"] or {}, r["заказ"] or {}
+        t = _когда(r)
+        беда = r["статус"] in ПРОБЛЕМЫ
+        стиль = {"т": 3 if беда else 0, "₴": 4 if беда else 2, "ч": 8 if беда else 7}
+        значения = [
+            f"{t:%d.%m.%Y}", f"{о['время']:%H:%M}" if о else "", з.get("филиал") or "",
+            "предоплата" if r["статус"] == "предоплата"
+            else ПОЯСНЕНИЕ.get(r["статус"], "сошлось"),
+            о.get("сумма") if о else None, о.get("комиссия") if о else None,
+            з.get("номер") if з else None,
+            ", ".join(f"{n} {_грн_(s).replace(_ПРОБЕЛ, ' ')}" for n, s in з.get("платежи") or []),
+            з.get("сумма") if з else None,
+            f"{з['доставка']:%d.%m %H:%M}" if з.get("доставка") else "",
+            з.get("причина") or "", о.get("карта", ""), о.get("инвойс", ""),
+        ]
+        ряды.append([(v, стиль[тип]) for v, (_, _, тип) in zip(значения, _КОЛОНКИ)])
+    последний = len(ряды)
+    деньги = [r["оплата"] for r in строки if r["оплата"]]
+    проблем = sum(r["статус"] in ПРОБЛЕМЫ for r in строки)
+    итог = [("Итого", 5), ("", 5), ("", 5), (f"Расхождений: {проблем}", 5),
+            (("f", f"SUBTOTAL(9,E2:E{последний})", round(sum(о["сумма"] for о in деньги), 2)), 6),
+            (("f", f"SUBTOTAL(9,F2:F{последний})", round(sum(о["комиссия"] for о in деньги), 2)), 6)]
+    итог += [("", 5)] * (len(_КОЛОНКИ) - len(итог))
+    ряды.append(итог)
+
+    xml_рядов = "".join(
+        f'<row r="{i}">' + "".join(_ячейка(f"{_буква(j)}{i}", v, s)
+                                   for j, (v, s) in enumerate(ряд)) + "</row>"
+        for i, ряд in enumerate(ряды, 1))
+    конец = _буква(len(_КОЛОНКИ) - 1)
+    лист_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" '
+        'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        '<cols>' + "".join(f'<col min="{i}" max="{i}" width="{ш}" customWidth="1"/>'
+                           for i, (_, ш, _) in enumerate(_КОЛОНКИ, 1)) + '</cols>'
+        f'<sheetData>{xml_рядов}</sheetData>'
+        f'<autoFilter ref="A1:{конец}{последний}"/></worksheet>')
+    имя = escape(лист[:31])
+    части = {
+        "[Content_Types].xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '</Types>',
+        "_rels/.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>',
+        "xl/workbook.xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets><sheet name="{имя}" sheetId="1" r:id="rId1"/></sheets>'
+            '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
+            f"'{имя}'!$A$1:${конец}${последний}</definedName></definedNames></workbook>",
+        "xl/_rels/workbook.xml.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>',
+        "xl/styles.xml": _СТИЛИ,
+        "xl/worksheets/sheet1.xml": лист_xml,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for путь, текст in части.items():
+            z.writestr(путь, текст.encode("utf-8"))
+    return buf.getvalue()
+
+
 def _дата(s):
     return datetime.strptime(s, "%Y-%m-%d").date() if "-" in s \
         else datetime.strptime(s + f".{date.today().year}" if s.count(".") == 1 else s,
