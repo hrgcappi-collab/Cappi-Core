@@ -157,7 +157,10 @@ def tg(method, **params):
             time.sleep(min(пауза, 30))
 
 
-def tg_файл(chat, имя, данные, подпись=""):
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def tg_файл(chat, имя, данные, подпись="", тип="text/csv"):
     """Отправить файл документом. sendDocument требует multipart — urlencode
     тут не годится, поэтому тело собираем руками."""
     граница = f"----cappi{int(time.time() * 1000)}"
@@ -166,7 +169,7 @@ def tg_файл(chat, имя, данные, подпись=""):
         части.append(f'--{граница}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
     части.append(f'--{граница}\r\nContent-Disposition: form-data; name="document"; '
                  f'filename="{urllib.parse.quote(имя)}"; filename*=UTF-8\'\'{urllib.parse.quote(имя)}\r\n'
-                 f'Content-Type: text/csv\r\n\r\n'.encode() + данные + b"\r\n")
+                 f'Content-Type: {тип}\r\n\r\n'.encode() + данные + b"\r\n")
     части.append(f"--{граница}--\r\n".encode())
     req = urllib.request.Request(f"{API}/sendDocument", data=b"".join(части),
                                  headers={"Content-Type": f"multipart/form-data; boundary={граница}"})
@@ -3359,7 +3362,7 @@ def _кнопки_месяца(м):
     ряд = [{"text": f"◀️ {_ИМЯ_МЕСЯЦА[пред.month]}", "callback_data": f"мм:{пред:%Y-%m}"}]
     if след <= date.today():
         ряд.append({"text": f"{_ИМЯ_МЕСЯЦА[след.month]} ▶️", "callback_data": f"мм:{след:%Y-%m}"})
-    return [ряд, [{"text": "📎 Таблица для Excel", "callback_data": f"мф:{м:%Y-%m}"}]]
+    return [ряд, [{"text": "📎 Excel за месяц", "callback_data": f"мф:{м:%Y-%m}"}]]
 
 
 def cmd_mono_месяц(chat, м=None):
@@ -3399,8 +3402,8 @@ def cmd_mono_файл(chat, м):
     строки, _ = mono.месяц(м.year, м.month)
     if not строки:
         return say(chat, "За этот месяц сохранённых сверок нет.")
-    tg_файл(chat, f"mono-{м:%Y-%m}.csv", mono.в_csv(строки),
-            f"Онлайн-оплаты mono ↔ Syrve, {_ИМЯ_МЕСЯЦА[м.month]} {м.year}")
+    tg_файл(chat, f"mono-{м:%Y-%m}.xlsx", mono.в_xlsx(строки),
+            f"Онлайн-оплаты mono ↔ Syrve, {_ИМЯ_МЕСЯЦА[м.month]} {м.year}", тип=XLSX)
 
 
 def _отказ(m, текст):
