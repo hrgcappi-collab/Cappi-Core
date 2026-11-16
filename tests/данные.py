@@ -99,30 +99,41 @@ print("\nполнота словаря концепций (за год):")
 from datetime import timedelta as _td
 _по = date.today()
 _с = _по - _td(days=365)
-with cappi.Syrve() as s:
-    _r = cappi._post(
-        f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
-        {"reportType": "TRANSACTIONS", "buildSummary": False,
-         "groupByRowFields": ["Conception"],
-         "aggregateFields": ["Sum.Incoming", "Sum.Outgoing"],
-         "filters": {"DateTime.DateTyped": {
-             "filterType": "DateRange", "periodType": "CUSTOM",
-             "from": _с.isoformat(), "to": (_по + _td(days=1)).isoformat()},
-             "Account.Name": {"filterType": "IncludeValues",
-                              "values": list(report.СЧЕТА_ВЫРУЧКИ)}}},
-        timeout=90)
+# Год проводок Syrve отдаёт небыстро, а ночью бывает не отдаёт вовсе:
+# 02.11.2026 выкатка встала именно здесь. Недоступный сервис — это не
+# провал проверки, и красить им гейт нельзя: ложное красное учит людей
+# обходить гейт. Тот же шаблон, что ниже у Loopa: «не ответила» и дальше.
+# Ловим только ВнешнийСбой — расхождение в цифрах по-прежнему красит.
 _чужие = []
-for _x in cappi.олап(_r):
-    _имя = _x.get("Conception")
-    _сум = (_x.get("Sum.Outgoing") or 0) - (_x.get("Sum.Incoming") or 0)
-    if abs(_сум) < 1:
-        continue
-    if _имя not in report.КОНЦЕПЦИИ:
-        _чужие.append((_имя, _сум))
-for _имя, _сум in _чужие:
-    print(f"  ❌ «{_имя}» нет в КОНЦЕПЦИИ — {_сум:,.0f} ₴ выпадает из разбивки")
-if not _чужие:
-    print("  ✅ все концепции с выручкой разобраны")
+_спросили = False
+try:
+    with cappi.Syrve() as s:
+        _r = cappi._post(
+            f"{s.host}/resto/api/v2/reports/olap?key={s.key}",
+            {"reportType": "TRANSACTIONS", "buildSummary": False,
+             "groupByRowFields": ["Conception"],
+             "aggregateFields": ["Sum.Incoming", "Sum.Outgoing"],
+             "filters": {"DateTime.DateTyped": {
+                 "filterType": "DateRange", "periodType": "CUSTOM",
+                 "from": _с.isoformat(), "to": (_по + _td(days=1)).isoformat()},
+                 "Account.Name": {"filterType": "IncludeValues",
+                                  "values": list(report.СЧЕТА_ВЫРУЧКИ)}}},
+            timeout=180)
+    _спросили = True
+except cappi.ВнешнийСбой as _e:
+    print(f"  ⏭ Syrve не ответила за год: {str(_e)[:70]}")
+if _спросили:
+    for _x in cappi.олап(_r):
+        _имя = _x.get("Conception")
+        _сум = (_x.get("Sum.Outgoing") or 0) - (_x.get("Sum.Incoming") or 0)
+        if abs(_сум) < 1:
+            continue
+        if _имя not in report.КОНЦЕПЦИИ:
+            _чужие.append((_имя, _сум))
+    for _имя, _сум in _чужие:
+        print(f"  ❌ «{_имя}» нет в КОНЦЕПЦИИ — {_сум:,.0f} ₴ выпадает из разбивки")
+    if not _чужие:
+        print("  ✅ все концепции с выручкой разобраны")
 провал += len(_чужие)
 
 # Полнота имён филиалов в Loopa. У Лазаревой их там два, и пока второе

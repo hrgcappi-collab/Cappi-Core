@@ -168,6 +168,19 @@ def _post(url, body, headers=None, timeout=60, попытка=0):
         # «409 Conflict», по которому невозможно понять, что не так.
         detail = e.read().decode("utf-8", "replace")[:300].strip()
         raise RuntimeError(f"HTTP {e.code}: {detail or e.reason}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # `_get` так делает с самого начала, а `_post` — нет, и перекос
+        # был в худшую сторону: POST'ами идут отчёты OLAP, номенклатура
+        # Cloud, доставки и приказ о цене. Таймаут чтения поднимает
+        # socket.timeout — это не HTTPError, он уходил наружу сырым, и
+        # человек видел «Сломалось» вместо «сервис не отвечает». На
+        # приказе это ещё и не говорит, прошёл он или нет.
+        # HTTPError — подкласс URLError, поэтому его ветка обязана
+        # остаться выше этой.
+        причина = str(getattr(e, "reason", e))[:80]
+        след(_сервис(url), _суть(url, body).get("что"), ошибка=причина,
+             мс=int((time.time() - начало) * 1000))
+        raise ВнешнийСбой(_сервис(url), причина) from None
 
 
 # Меню украинское, ищут часто по-русски: «Филадельфия» vs «Філадельфія».
